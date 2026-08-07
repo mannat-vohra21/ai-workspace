@@ -82,10 +82,12 @@ export function useSpeechRecognition() {
   return { isListening, isSupported, startListening, stopListening };
 }
 
-export function speak(text: string): void {
+export function speak(text: string, onEnd?: () => void): void {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
+  utterance.onend = () => onEnd?.();
+  utterance.onerror = () => onEnd?.();
   window.speechSynthesis.speak(utterance);
 }
 

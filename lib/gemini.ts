@@ -51,8 +51,7 @@ function historyToContents(history: Message[]): GeminiContent[] {
   }));
 }
 
-const BUILDER_SYSTEM = `You are a helpful AI assistant working inside a project workspace. Answer the user's latest message directly and usefully, using the prior conversation for context.`;
-
+const BUILDER_SYSTEM = `You are a helpful AI assistant working inside a project workspace. Answer the user's latest message directly and usefully, using the prior conversation for context. You can only generate text — you cannot generate, create, or return images. If the user asks for an image, politely explain that image generation isn't supported yet and offer to help with text-based alternatives instead.`;
 export async function generateBuilderResponse(
   history: Message[],
   userMessage: string

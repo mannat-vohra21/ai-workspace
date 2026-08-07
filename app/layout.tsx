@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import * as db from "@/lib/db";
+import WorkspaceLayout from "@/components/WorkspaceLayout";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -13,17 +15,25 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Workspace",
-  description: "AI workspace with project memory and verification mode",
+  title: "AI Workspace | Spatial Dual-AI Platform",
+  description: "AI-to-AI workspace with project memory and verified multi-agent build mode",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const projects = db.listProjects();
+
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="h-full bg-[#07070a] text-[#f3f4f6] overflow-hidden antialiased">
+        <WorkspaceLayout projects={projects}>{children}</WorkspaceLayout>
+      </body>
     </html>
   );
 }
