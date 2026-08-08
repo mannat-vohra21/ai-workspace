@@ -30,11 +30,19 @@ function initDb(): Database.Database {
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       verification TEXT,
+      provider TEXT,
       created_at TEXT NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_project_id ON messages(project_id);
   `);
+
+  // Migration safety net for databases created before the `provider` column
+  // existed — CREATE TABLE IF NOT EXISTS above won't add it to an old table.
+  const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!messageColumns.some((c) => c.name === "provider")) {
+    db.exec("ALTER TABLE messages ADD COLUMN provider TEXT");
+  }
 
   return db;
 }
@@ -62,6 +70,7 @@ interface MessageRow {
   role: string;
   content: string;
   verification: string | null;
+  provider: string | null;
   created_at: string;
 }
 
@@ -82,6 +91,7 @@ function rowToMessage(row: MessageRow): Message {
     role: row.role as Message["role"],
     content: row.content,
     verification: row.verification ? (JSON.parse(row.verification) as VerificationInfo) : null,
+    provider: (row.provider as Message["provider"]) ?? undefined,
     createdAt: row.created_at,
   };
 }
@@ -149,17 +159,19 @@ export function addMessage(input: {
   role: Message["role"];
   content: string;
   verification?: VerificationInfo | null;
+  provider?: Message["provider"] | null;
 }): Message {
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
   db.prepare(
-    "INSERT INTO messages (id, project_id, role, content, verification, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO messages (id, project_id, role, content, verification, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
   ).run(
     id,
     input.projectId,
     input.role,
     input.content,
     input.verification ? JSON.stringify(input.verification) : null,
+    input.provider ?? null,
     createdAt
   );
   return {
@@ -168,6 +180,7 @@ export function addMessage(input: {
     role: input.role,
     content: input.content,
     verification: input.verification ?? null,
+    provider: input.provider ?? undefined,
     createdAt,
   };
 }

@@ -25,6 +25,7 @@ import {
 import type { Message, Project, ProjectMemory } from "@/types";
 import MemoryPanel from "@/components/MemoryPanel";
 import ExportModal from "@/components/ExportModal";
+import CodePreview from "@/components/CodePreview";
 import { useSpeechRecognition, speak, stopSpeaking } from "@/lib/voice";
 import { useWorkspace } from "@/components/WorkspaceLayout";
 
@@ -230,6 +231,7 @@ export default function ChatInterface({
             <MessageBubble
               key={message.id}
               message={message}
+              domain={project.domain}
               speakingId={speakingId}
               onToggleSpeak={handleToggleSpeak}
             />
@@ -359,18 +361,50 @@ export default function ChatInterface({
   );
 }
 
+const PROVIDER_ROUTE_META: Record<NonNullable<Message["provider"]>, { emoji: string; label: string }> = {
+  groq: { emoji: "⚡", label: "Groq" },
+  gemini: { emoji: "🧠", label: "Gemini" },
+  nvidia: { emoji: "🟩", label: "NVIDIA" },
+};
+
+function extractHtmlBlock(content: string): string | null {
+  if (!content) return null;
+
+  // 1. Look for ```html ... ``` fenced block first (most common case)
+  const htmlBlockRegex = /```html\b([\s\S]*?)```/i;
+  const match = content.match(htmlBlockRegex);
+  if (match && match[1]) {
+    const code = match[1].trim();
+    if (code) return code;
+  }
+
+  // 2. Fall back to checking if the raw content itself looks like a full HTML document (starts with <!DOCTYPE or <html)
+  const trimmed = content.trim();
+  if (
+    trimmed.toLowerCase().startsWith("<!doctype") ||
+    trimmed.toLowerCase().startsWith("<html")
+  ) {
+    return trimmed;
+  }
+
+  return null;
+}
+
 {/* Muted Subtle Message Item Component */}
 function MessageBubble({
   message,
+  domain,
   speakingId,
   onToggleSpeak,
 }: {
   message: Message;
+  domain: Project["domain"];
   speakingId: string | null;
   onToggleSpeak: (id: string, content: string) => void;
 }) {
   const isUser = message.role === "user";
   const [showVerificationDetails, setShowVerificationDetails] = useState(false);
+  const extractedHtml = !isUser ? extractHtmlBlock(message.content) : null;
 
   return (
     <div className={`flex flex-col ${isUser ? "items-end" : "items-start"} space-y-1.5 group`}>
@@ -421,6 +455,16 @@ function MessageBubble({
           )}
         </div>
       </div>
+
+      {/* Smart Provider Routing Badge */}
+      {!isUser && message.provider && (
+        <div className="max-w-[88%] md:max-w-[80%] flex items-center gap-1 px-1 text-[10px] text-gray-500">
+          <span>{PROVIDER_ROUTE_META[message.provider].emoji}</span>
+          <span>
+            Routed to {PROVIDER_ROUTE_META[message.provider].label} — optimized for {domain} tasks
+          </span>
+        </div>
+      )}
 
       {/* Verification Audit Breakdown Dropdown */}
       {message.verification && (
@@ -477,6 +521,13 @@ function MessageBubble({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Code Live Preview */}
+      {extractedHtml && (
+        <div className="w-full max-w-[88%] md:max-w-[80%]">
+          <CodePreview code={extractedHtml} />
         </div>
       )}
     </div>

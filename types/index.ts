@@ -25,6 +25,7 @@ export interface Message {
   role: MessageRole;
   content: string;
   verification?: VerificationInfo | null;
+  provider?: "gemini" | "groq" | "nvidia";
   createdAt: string;
 }
 

@@ -24,11 +24,12 @@ export async function POST(request: NextRequest) {
     const history = db.listMessages(projectId);
     db.addMessage({ projectId, role: "user", content: message });
 
-    const aiText = await generateBuilderResponse(history, message);
+    const { text: aiText, provider } = await generateBuilderResponse(history, message, project.domain);
     const assistantMessage = db.addMessage({
       projectId,
       role: "assistant",
       content: aiText,
+      provider,
     });
 
     const currentMemory = db.getMemory(projectId);
