@@ -378,13 +378,49 @@ function extractHtmlBlock(content: string): string | null {
     if (code) return code;
   }
 
-  // 2. Fall back to checking if the raw content itself looks like a full HTML document (starts with <!DOCTYPE or <html)
-  const trimmed = content.trim();
-  if (
-    trimmed.toLowerCase().startsWith("<!doctype") ||
-    trimmed.toLowerCase().startsWith("<html")
-  ) {
-    return trimmed;
+  // 2. Look for any generic code block: ```[lang] ... ``` that contains HTML structures
+  const genericBlockRegex = /```[a-zA-Z0-9_-]*([\s\S]*?)```/g;
+  let blockMatch;
+  while ((blockMatch = genericBlockRegex.exec(content)) !== null) {
+    const code = blockMatch[1].trim();
+    const lowerCode = code.toLowerCase();
+    if (
+      lowerCode.includes("<!doctype html") ||
+      lowerCode.includes("<html") ||
+      (lowerCode.includes("<head") && lowerCode.includes("<body")) ||
+      lowerCode.includes("</html>") ||
+      lowerCode.includes("</body>")
+    ) {
+      return code;
+    }
+  }
+
+  // 3. Look for any HTML substring in the raw content starting with <!DOCTYPE html or <html and ending with </html> or </body>
+  const lowerContent = content.toLowerCase();
+  let startIdx = lowerContent.indexOf("<!doctype html");
+  if (startIdx === -1) {
+    startIdx = lowerContent.indexOf("<html");
+  }
+
+  if (startIdx !== -1) {
+    let endIdx = lowerContent.lastIndexOf("</html>");
+    if (endIdx !== -1) {
+      endIdx += 7; // include </html>
+    } else {
+      endIdx = lowerContent.lastIndexOf("</body>");
+      if (endIdx !== -1) {
+        endIdx += 7; // include </body>
+      }
+    }
+
+    if (endIdx !== -1 && endIdx > startIdx) {
+      return content.substring(startIdx, endIdx).trim();
+    }
+
+    // Fallback: If it's a long text starting with html tag but without a clean closing tag
+    if (lowerContent.length - startIdx > 100) {
+      return content.substring(startIdx).trim();
+    }
   }
 
   return null;
