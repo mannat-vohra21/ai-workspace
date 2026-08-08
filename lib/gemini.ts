@@ -1,3 +1,6 @@
+// TEMPORARY: Builder/Planner/Memory currently routed to Groq because Gemini
+// free-tier daily quota is exhausted. Switch back to callGemini() for these
+// once quota resets or a new key is available.
 import type { Message, ProjectMemory, VerificationInfo } from "@/types";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
@@ -51,13 +54,94 @@ function historyToContents(history: Message[]): GeminiContent[] {
   }));
 }
 
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+const GROQ_PROVIDER_LABEL = "Groq (Llama 3.3)";
+const GEMINI_PROVIDER_LABEL = "Gemini (Flash)";
+// TEMPORARY: both point at Groq until Gemini quota resets — swap
+// BUILDER_PROVIDER_LABEL back to GEMINI_PROVIDER_LABEL alongside the
+// generatePlan()/generateBuilderResponse()/reviseResponse() call swaps below.
+const BUILDER_PROVIDER_LABEL: string = GROQ_PROVIDER_LABEL;
+const VERIFIER_PROVIDER_LABEL = GROQ_PROVIDER_LABEL;
+
+interface GroqMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+function historyToGroqMessages(history: Message[]): GroqMessage[] {
+  return history.map((m) => ({
+    role: m.role === "user" ? "user" : "assistant",
+    content: m.content,
+  }));
+}
+
+async function callGroq(
+  messages: GroqMessage[],
+  systemInstruction?: string
+): Promise<string> {
+  if (!GROQ_API_KEY) {
+    throw new Error(
+      "GROQ_API_KEY is not set. Add it to .env.local to use cross-provider verification."
+    );
+  }
+
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+  const body = {
+    model: GROQ_MODEL,
+    messages: systemInstruction
+      ? [{ role: "system" as const, content: systemInstruction }, ...messages]
+      : messages,
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${GROQ_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`Groq API error (${res.status}):`, errText);
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("Groq API error: invalid or unauthorized GROQ_API_KEY.");
+    }
+    if (res.status === 429) {
+      throw new Error("Groq API error: rate limit exceeded. Please try again shortly.");
+    }
+    throw new Error(`Groq API error (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content ?? "";
+  if (!text) {
+    throw new Error("Groq API returned an empty response.");
+  }
+  return text.trim();
+}
+
+const PLANNER_SYSTEM = `You are a planner. Given the user's request, briefly outline your approach in 1-3 short lines before it gets built. Don't answer the request itself, just the plan.`;
+
+export async function generatePlan(history: Message[], userMessage: string): Promise<string> {
+  const messages = [...historyToGroqMessages(history), { role: "user" as const, content: userMessage }];
+  return callGroq(messages, PLANNER_SYSTEM);
+}
+
 const BUILDER_SYSTEM = `You are a helpful AI assistant working inside a project workspace. Answer the user's latest message directly and usefully, using the prior conversation for context. You can only generate text — you cannot generate, create, or return images. If the user asks for an image, politely explain that image generation isn't supported yet and offer to help with text-based alternatives instead.`;
 export async function generateBuilderResponse(
   history: Message[],
-  userMessage: string
+  userMessage: string,
+  plan?: string
 ): Promise<string> {
-  const contents = [...historyToContents(history), { role: "user" as const, parts: [{ text: userMessage }] }];
-  return callGemini(contents, BUILDER_SYSTEM);
+  const latestMessage = plan
+    ? `${userMessage}\n\n(Your approach plan for this response: ${plan})`
+    : userMessage;
+  const messages = [...historyToGroqMessages(history), { role: "user" as const, content: latestMessage }];
+  return callGroq(messages, BUILDER_SYSTEM);
 }
 
 const VERIFIER_SYSTEM = `You are a strict but fair reviewer. You will be given a user's request and an AI assistant's draft response to it. Decide whether the draft adequately and correctly addresses the request.
@@ -74,7 +158,7 @@ export async function verifyResponse(
   draftResponse: string
 ): Promise<{ approved: boolean; issues: string[] }> {
   const prompt = `User's request:\n${userMessage}\n\nDraft response to review:\n${draftResponse}`;
-  const raw = await callGemini([{ role: "user", parts: [{ text: prompt }] }], VERIFIER_SYSTEM);
+  const raw = await callGroq([{ role: "user", content: prompt }], VERIFIER_SYSTEM);
 
   const cleaned = raw.replace(/```json|```/g, "").trim();
   try {
@@ -93,7 +177,8 @@ export async function reviseResponse(
   issues: string[]
 ): Promise<string> {
   const prompt = `Original request:\n${userMessage}\n\nYour draft response:\n${draftResponse}\n\nReviewer issues:\n${issues.map((i) => `- ${i}`).join("\n")}\n\nWrite the revised response.`;
-  return callGemini([{ role: "user", parts: [{ text: prompt }] }], REVISE_SYSTEM);
+  // TEMPORARY: routed to Groq alongside the Builder (see note at top of file).
+  return callGroq([{ role: "user", content: prompt }], REVISE_SYSTEM);
 }
 
 const MEMORY_SYSTEM = `You maintain a structured memory object for a project, based on its ongoing chat. You will be given the current memory and the latest user/assistant exchange. Update the memory to reflect any new goals, completed work, pending tasks, or decisions mentioned. Keep existing items unless they're clearly done or superseded. Keep each list concise (short strings, no duplicates, max ~8 items each).
@@ -108,7 +193,7 @@ export async function updateMemoryFromExchange(
 ): Promise<ProjectMemory> {
   const prompt = `Current memory:\n${JSON.stringify(memory)}\n\nLatest exchange:\nUser: ${userMessage}\nAssistant: ${aiResponse}\n\nReturn the updated memory JSON.`;
   try {
-    const raw = await callGemini([{ role: "user", parts: [{ text: prompt }] }], MEMORY_SYSTEM);
+    const raw = await callGroq([{ role: "user", content: prompt }], MEMORY_SYSTEM);
     const cleaned = raw.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(cleaned) as ProjectMemory;
     return {
@@ -132,11 +217,20 @@ export async function runVerifiedBuild(
   history: Message[],
   userMessage: string
 ): Promise<VerifiedBuildResult> {
-  const draft = await generateBuilderResponse(history, userMessage);
+  const plan = await generatePlan(history, userMessage);
+  const draft = await generateBuilderResponse(history, userMessage, plan);
   const review = await verifyResponse(userMessage, draft);
 
   if (review.approved) {
-    return { finalText: draft, verification: { status: "approved" } };
+    return {
+      finalText: draft,
+      verification: {
+        status: "approved",
+        plan,
+        builderProvider: BUILDER_PROVIDER_LABEL,
+        verifierProvider: VERIFIER_PROVIDER_LABEL,
+      },
+    };
   }
 
   const revised = await reviseResponse(userMessage, draft, review.issues);
@@ -146,6 +240,9 @@ export async function runVerifiedBuild(
       status: "revised",
       reason: review.issues[0] ?? "Reviewer requested changes.",
       issues: review.issues,
+      plan,
+      builderProvider: BUILDER_PROVIDER_LABEL,
+      verifierProvider: VERIFIER_PROVIDER_LABEL,
     },
   };
 }

@@ -167,7 +167,7 @@ export default function ChatInterface({
               <div className="relative w-6 h-3.5 bg-gray-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[1.5px] after:left-[1.5px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-2.5 after:w-2.5 after:transition-all peer-checked:bg-violet-600/70" />
               <div className="flex items-center gap-1.5 text-xs text-gray-400 font-medium">
                 <ShieldCheck className={`w-3.5 h-3.5 ${verificationMode ? "text-violet-400" : "text-gray-500"}`} />
-                <span className="hidden sm:inline">Verification Mode</span>
+                <span className="hidden sm:inline">Council Mode</span>
               </div>
             </label>
 
@@ -201,11 +201,11 @@ export default function ChatInterface({
             <div className="flex items-center gap-2 min-w-0">
               <Cpu className="w-3.5 h-3.5 text-violet-400 shrink-0" />
               <span className="truncate">
-                Verification Mode ON — Builder drafts response, Verifier performs audit check.
+                Council Mode ON — Planner outlines approach, Builder drafts response, Verifier performs audit check.
               </span>
             </div>
             <span className="text-[10px] uppercase font-mono tracking-wider px-1.5 py-0.5 rounded bg-white/5 text-gray-400 border border-white/10 shrink-0">
-              Dual-Agent Audit
+              3-Role Council
             </span>
           </div>
         )}
@@ -243,11 +243,11 @@ export default function ChatInterface({
               </div>
               <div className="flex flex-col space-y-1.5">
                 <span className="text-[11px] font-medium text-gray-400">
-                  {verificationMode ? "Dual AI Agents" : "Builder AI"}
+                  {verificationMode ? "AI Council" : "Builder AI"}
                 </span>
                 <div className="flex items-center gap-2 p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-xs text-gray-400">
                   <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-ping" />
-                  <span>{verificationMode ? "Evaluating draft & checking verification criteria..." : "Formulating response..."}</span>
+                  <span>{verificationMode ? "Planning approach, drafting, and verifying..." : "Formulating response..."}</span>
                 </div>
               </div>
             </div>
@@ -306,7 +306,7 @@ export default function ChatInterface({
               <button
                 type="button"
                 onClick={() => setVerificationMode((prev) => !prev)}
-                title="Toggle Verification Mode"
+                title="Toggle Council Mode"
                 className={`px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors hidden sm:flex items-center gap-1 shrink-0 ${
                   verificationMode
                     ? "bg-white/10 border-white/20 text-white"
@@ -432,8 +432,8 @@ function MessageBubble({
             <ShieldCheck className="w-3.5 h-3.5 text-violet-400" />
             <span>
               {message.verification.status === "approved"
-                ? "Dual-AI Audit: Approved on first pass"
-                : `Dual-AI Audit: Revised after verification (${message.verification.reason ?? "issues fixed"})`}
+                ? "Council Audit: Approved on first pass"
+                : `Council Audit: Revised after verification (${message.verification.reason ?? "issues fixed"})`}
             </span>
             {showVerificationDetails ? (
               <ChevronUp className="w-3 h-3 text-gray-500" />
@@ -443,10 +443,27 @@ function MessageBubble({
           </button>
 
           {showVerificationDetails && (
-            <div className="mt-1 p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06] space-y-1.5 text-gray-300">
-              <div className="flex items-center gap-1.5 font-medium text-[11px] text-emerald-400">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Verification Status: {message.verification.status.toUpperCase()}</span>
+            <div className="mt-1 p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06] space-y-2 text-gray-300">
+              {message.verification.plan && (
+                <div className="space-y-0.5">
+                  <span className="text-[10px] uppercase font-semibold text-gray-400">Planner:</span>
+                  <p className="text-xs text-gray-400 whitespace-pre-wrap">{message.verification.plan}</p>
+                </div>
+              )}
+              <div className="space-y-0.5">
+                <span className="text-[10px] uppercase font-semibold text-gray-400">Builder → Verifier:</span>
+                <div className="flex items-center gap-1.5 font-medium text-[11px] text-emerald-400">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Verification Status: {message.verification.status.toUpperCase()}</span>
+                </div>
+                {message.verification.verifierProvider && (
+                  <div className="text-[10px] text-gray-500">
+                    {message.verification.builderProvider &&
+                    message.verification.builderProvider !== message.verification.verifierProvider
+                      ? `Reviewed by ${message.verification.verifierProvider} — cross-provider check`
+                      : `Reviewed by ${message.verification.verifierProvider}`}
+                  </div>
+                )}
               </div>
               {message.verification.issues && message.verification.issues.length > 0 && (
                 <div className="space-y-0.5">

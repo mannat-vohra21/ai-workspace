@@ -14,6 +14,9 @@ export interface VerificationInfo {
   status: "approved" | "revised";
   reason?: string;
   issues?: string[];
+  plan?: string;
+  builderProvider?: string;
+  verifierProvider?: string;
 }
 
 export interface Message {
