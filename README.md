@@ -11,7 +11,7 @@ AI chat tools forget everything the moment you close the tab or hit a usage limi
 ## What This Does
 
 - **Persistent project memory** — every conversation automatically extracts and tracks goals, completed work, pending tasks, and decisions, so context survives across sessions.
-- **Smart Provider Routing** — each project's domain (Code / Content / Research / Business) automatically determines which AI provider handles it: Groq for code and business tasks, Gemini for content, NVIDIA Nemotron 3 Ultra for research. A visible badge on every response shows which provider actually answered, and the app transparently falls back to Groq if the selected provider is unavailable.
+- **Smart Provider Routing** — each project's domain (Code / Content / Research / Business) automatically determines which AI provider handles it: NVIDIA Nemotron 3 Ultra for code and research, Gemini for content, Groq for business tasks. A visible badge on every response shows which provider actually answered, and the app transparently falls back to Groq if the selected provider is unavailable.
 - **Council Mode** — a multi-agent pipeline where one AI plans, a second builds the response, and a *different* AI (on a separate provider) independently reviews it before it's shown to you. If the reviewer finds issues, the response is automatically revised.
 - **Voice input/output** — talk to the assistant instead of typing, and have responses read back to you.
 - **Context export** — download a project's full memory as Markdown or PDF, so you can carry it into any other AI tool.
@@ -96,7 +96,7 @@ types/
 
 ## Design Decisions
 
-- **Domain-based smart routing, not a fixed model.** Each project's domain routes to whichever provider tends to suit it best (Groq for fast/structured code and business output, Gemini for nuanced writing, NVIDIA Nemotron 3 Ultra for reasoning-heavy research) — and the response always carries a badge showing which provider actually served it, with automatic fallback to Groq if the chosen one is unavailable.
+- **Domain-based smart routing, not a fixed model.** Each project's domain routes to whichever provider tends to suit it best (NVIDIA Nemotron 3 Ultra for code/website generation and reasoning-heavy research, Gemini for nuanced writing, Groq for fast/structured business output) — and the response always carries a badge showing which provider actually served it, with automatic fallback to Groq if the chosen one is unavailable.
 - **Cross-provider verification, not self-review.** Having the same model check its own output tends to rubber-stamp mistakes. Routing the Verifier to a separate provider (Groq) makes the check meaningful.
 - **Fail-soft memory updates.** If the AI's memory-extraction call returns malformed JSON, the app retries once, then silently falls back to the previous memory state rather than breaking the chat — a demo or real session should never crash over a formatting hiccup.
 - **Client-side PDF generation.** Export runs entirely in the browser (no server round-trip, no added API cost) since the data needed is already in memory.

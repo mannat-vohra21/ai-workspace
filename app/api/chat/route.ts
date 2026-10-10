@@ -33,10 +33,17 @@ export async function POST(request: NextRequest) {
     });
 
     const currentMemory = db.getMemory(projectId);
-    const updatedMemory = await updateMemoryFromExchange(currentMemory, message, aiText);
-    db.setMemory(projectId, updatedMemory);
 
-    return NextResponse.json({ message: assistantMessage, memory: updatedMemory });
+    // Update memory asynchronously in the background so the response returns immediately
+    updateMemoryFromExchange(currentMemory, message, aiText)
+      .then((updatedMemory) => {
+        db.setMemory(projectId, updatedMemory);
+      })
+      .catch((err) => {
+        console.error("Background memory update error:", err);
+      });
+
+    return NextResponse.json({ message: assistantMessage, memory: currentMemory });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: msg }, { status: 500 });

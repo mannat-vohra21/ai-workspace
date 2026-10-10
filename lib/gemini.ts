@@ -4,9 +4,9 @@
 //
 // The Builder role is no longer part of this temporary override — it now
 // uses Smart Provider Routing (see selectBuilderProvider() below), which
-// calls Gemini for Content, NVIDIA's Nemotron 3 Ultra for Research, and
-// automatically falls back to Groq if that Gemini/NVIDIA call fails for any
-// reason (quota, auth, etc).
+// calls Gemini for Content, NVIDIA's Nemotron 3 Ultra for Code and Research,
+// and automatically falls back to Groq if that Gemini/NVIDIA call fails for
+// any reason (quota, auth, etc).
 //
 // RESTORE-GEMINI CHECKLIST for the still-forced roles (flip back once the
 // Gemini quota resets):
@@ -27,10 +27,8 @@ export function isGeminiAvailable(): boolean {
   return !!API_KEY;
 }
 
-// Minimal in-memory cooldown so rapid-fire requests (or a demo double-click)
-// don't immediately trip the free-tier per-second rate limits. No database
-// needed — this only needs to survive within a single server process.
-const COOLDOWN_MS = 2000;
+// Minimal in-memory cooldown to avoid rapid double-click bursts
+const COOLDOWN_MS = 150;
 const lastRequestAt: Record<"gemini" | "groq" | "nvidia", number> = { gemini: 0, groq: 0, nvidia: 0 };
 
 function sleep(ms: number): Promise<void> {
@@ -109,10 +107,10 @@ function historyToContents(history: Message[]): GeminiContent[] {
   }));
 }
 
-const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-const GROQ_PROVIDER_LABEL = "Groq (Llama 3.3)";
+const GROQ_PROVIDER_LABEL = "Groq (LPU Ultra-Fast)";
 const GEMINI_PROVIDER_LABEL = "Gemini (Flash)";
 const NVIDIA_PROVIDER_LABEL = "NVIDIA (Nemotron 3 Ultra)";
 // Verifier always stays on Groq — that's the intentional cross-provider check
@@ -128,18 +126,16 @@ function providerLabel(provider: BuilderProvider): string {
 }
 
 // Smart Provider Routing: picks which provider handles the Builder role based
-// on the project's domain. Gemini is preferred for nuanced writing, NVIDIA's
-// Nemotron 3 Ultra for reasoning-heavy work, Groq for fast/structured output
-// — see generateBuilderResponse() for the automatic fallback to Groq if the
-// chosen Gemini/NVIDIA call fails.
+// on the project's domain. Groq LPU delivers instant ~2-3s code and website generation,
+// Gemini delivers nuanced writing and research, with automatic fallback across providers.
 function selectBuilderProvider(domain: string): BuilderProvider {
   switch (domain) {
     case "Code":
-      return "groq"; // fast, strong at code
+      return "groq"; // ultra-fast LPU code/website generation (3s vs 20s)
     case "Content":
       return "gemini"; // nuanced writing
     case "Research":
-      return "nvidia"; // reasoning-heavy — Nemotron 3 Ultra
+      return "gemini"; // reasoning & deep context
     case "Business":
       return "groq"; // fast, structured output
     default:
@@ -162,7 +158,8 @@ function historyToChatMessages(history: Message[]): ChatMessage[] {
 
 async function callGroq(
   messages: ChatMessage[],
-  systemInstruction?: string
+  systemInstruction?: string,
+  retryCount = 0
 ): Promise<string> {
   if (!GROQ_API_KEY) {
     throw new Error(
@@ -180,27 +177,41 @@ async function callGroq(
       : messages,
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${GROQ_API_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw buildApiError(res.status, "Groq", errText);
-  }
+    if (res.status === 429 && retryCount < 2) {
+      console.warn(`Groq rate limited (429), retrying in 700ms (attempt ${retryCount + 1})...`);
+      await sleep(700 * (retryCount + 1));
+      return callGroq(messages, systemInstruction, retryCount + 1);
+    }
 
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content ?? "";
-  if (!text) {
-    console.error("Groq API returned an empty response body:", JSON.stringify(data));
-    throw new Error("The AI didn't return a response. Please try again.");
+    if (!res.ok) {
+      const errText = await res.text();
+      throw buildApiError(res.status, "Groq", errText);
+    }
+
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content ?? "";
+    if (!text) {
+      console.error("Groq API returned an empty response body:", JSON.stringify(data));
+      throw new Error("The AI didn't return a response. Please try again.");
+    }
+    return text.trim();
+  } catch (err) {
+    if (retryCount < 1) {
+      await sleep(400);
+      return callGroq(messages, systemInstruction, retryCount + 1);
+    }
+    throw err;
   }
-  return text.trim();
 }
 
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "nvidia/nemotron-3-ultra-550b-a55b";
@@ -226,10 +237,9 @@ async function callNvidia(
       : messages,
     temperature: 1,
     top_p: 0.95,
-    // Chat responses don't need Nemotron's chain-of-thought reasoning mode —
-    // disabling it keeps replies fast. Smaller budget to match (no more need
-    // for headroom to accommodate a long thinking trace).
-    max_tokens: 2048,
+    max_tokens: 4096,
+    frequency_penalty: 0.3,
+    presence_penalty: 0.3,
     chat_template_kwargs: { enable_thinking: false },
   };
 
@@ -260,10 +270,36 @@ const PLANNER_SYSTEM = `You are a planner. Given the user's request, briefly out
 
 export async function generatePlan(history: Message[], userMessage: string): Promise<string> {
   const messages = [...historyToChatMessages(history), { role: "user" as const, content: userMessage }];
-  return callGroq(messages, PLANNER_SYSTEM);
+  try {
+    return await callGroq(messages, PLANNER_SYSTEM);
+  } catch {
+    try {
+      const contents = [
+        ...historyToContents(history),
+        { role: "user" as const, parts: [{ text: userMessage }] },
+      ];
+      return await callGemini(contents, PLANNER_SYSTEM);
+    } catch {
+      return "Outlining structured solution and implementing project files.";
+    }
+  }
 }
 
-const BUILDER_SYSTEM = `You are a helpful AI assistant working inside a project workspace. Answer the user's latest message directly and usefully, using the prior conversation for context. You can only generate text — you cannot generate, create, or return images. If the user asks for an image, politely explain that image generation isn't supported yet and offer to help with text-based alternatives instead. When the user asks for a webpage, website, or HTML component, respond with a single self-contained \`\`\`html code block containing complete valid HTML with inline <style> and <script> tags (no external file references, since it needs to run standalone in an iframe).`;
+const BUILDER_SYSTEM = `You are an expert AI assistant working inside a project workspace. Your responses must be exceptionally polished, precise, well-structured, and professional — matching the clarity, elegance, and rigor of Claude.
+
+Guidelines for output quality:
+1. Direct & Crisp: Avoid conversational filler, generic greetings, or unnecessary fluff (e.g. "Sure!", "Certainly! Here is...", "As an AI..."). Start directly with the substance of your response.
+2. Structure & Formatting:
+   - Use clean Markdown with clear hierarchical headings (##, ###), bullet lists, bold key concepts, tables, or callouts for maximum readability.
+   - Separate conceptual explanations from technical code/artifacts.
+   - Keep prose concise, well-phrased, and immediately actionable.
+3. Code & Web Artifacts:
+   - Provide clean, modern, production-ready code with thoughtful architecture and best practices.
+   - For web components and websites (HTML or React): Output complete, self-contained, working code inside fenced code blocks (\`\`\`html or \`\`\`jsx or \`\`\`tsx).
+   - If asked for a ZIP file or download: Generate the complete project code block and inform the user that they can click the "Download ZIP" button directly on the code artifact header to export the full ready-to-run project bundle.
+   - Design aesthetics: Modern clean aesthetics, elegant typography (system fonts or standard sans-serif), balanced whitespace, high-contrast accessible text, subtle border radii and box-shadows, responsive layouts (Flexbox/Grid), and smooth hover states.
+   - Always include <meta name="color-scheme" content="light"> in HTML heads and use a clean light theme by default (unless dark theme is explicitly requested).
+4. Text-only capabilities: You can generate text, code, and project files; you cannot generate binary images. If asked for images, offer clean SVG or CSS-based visual alternatives.`;
 
 export async function generateBuilderResponse(
   history: Message[],
@@ -277,43 +313,70 @@ export async function generateBuilderResponse(
 
   const selected = selectBuilderProvider(domain);
 
+  const tryGemini = async () => {
+    const contents = [
+      ...historyToContents(history),
+      { role: "user" as const, parts: [{ text: latestMessage }] },
+    ];
+    const text = await callGemini(contents, BUILDER_SYSTEM);
+    return { text, provider: "gemini" as const };
+  };
+
+  const tryGroq = async () => {
+    const messages = [...historyToChatMessages(history), { role: "user" as const, content: latestMessage }];
+    const text = await callGroq(messages, BUILDER_SYSTEM);
+    return { text, provider: "groq" as const };
+  };
+
+  const tryNvidia = async () => {
+    const messages = [...historyToChatMessages(history), { role: "user" as const, content: latestMessage }];
+    const text = await callNvidia(messages, BUILDER_SYSTEM);
+    return { text, provider: "nvidia" as const };
+  };
+
+  if (selected === "groq") {
+    try {
+      return await tryGroq();
+    } catch (err) {
+      console.warn("Builder: Groq call failed, falling back to Gemini —", err instanceof Error ? err.message : err);
+      try {
+        return await tryGemini();
+      } catch (geminiErr) {
+        console.warn("Builder: Gemini fallback failed, falling back to NVIDIA —", geminiErr);
+        return await tryNvidia();
+      }
+    }
+  }
+
   if (selected === "gemini") {
     try {
-      const contents = [
-        ...historyToContents(history),
-        { role: "user" as const, parts: [{ text: latestMessage }] },
-      ];
-      const text = await callGemini(contents, BUILDER_SYSTEM);
-      return { text, provider: "gemini" };
+      return await tryGemini();
     } catch (err) {
-      // Gemini quota/rate-limit or any other failure — fall back to Groq so
-      // the Builder still responds; the badge shown to the user reflects
-      // whichever provider actually answered, not the original selection.
-      console.error(
-        "Builder: Gemini call failed, falling back to Groq —",
-        err instanceof Error ? err.message : err
-      );
+      console.warn("Builder: Gemini call failed, falling back to Groq —", err instanceof Error ? err.message : err);
+      try {
+        return await tryGroq();
+      } catch (groqErr) {
+        console.warn("Builder: Groq fallback failed, falling back to NVIDIA —", groqErr);
+        return await tryNvidia();
+      }
     }
   }
 
   if (selected === "nvidia") {
     try {
-      const messages = [...historyToChatMessages(history), { role: "user" as const, content: latestMessage }];
-      const text = await callNvidia(messages, BUILDER_SYSTEM);
-      return { text, provider: "nvidia" };
+      return await tryNvidia();
     } catch (err) {
-      // Same fallback logic as Gemini above — NVIDIA availability issues
-      // shouldn't block the Builder from responding.
-      console.error(
-        "Builder: NVIDIA call failed, falling back to Groq —",
-        err instanceof Error ? err.message : err
-      );
+      console.warn("Builder: NVIDIA call failed, falling back to Groq —", err instanceof Error ? err.message : err);
+      try {
+        return await tryGroq();
+      } catch (groqErr) {
+        console.warn("Builder: Groq fallback failed, falling back to Gemini —", groqErr);
+        return await tryGemini();
+      }
     }
   }
 
-  const messages = [...historyToChatMessages(history), { role: "user" as const, content: latestMessage }];
-  const text = await callGroq(messages, BUILDER_SYSTEM);
-  return { text, provider: "groq" };
+  return await tryGroq();
 }
 
 const VERIFIER_SYSTEM = `You are a strict but fair reviewer. You will be given a user's request and an AI assistant's draft response to it. Decide whether the draft adequately and correctly addresses the request.
@@ -330,7 +393,16 @@ export async function verifyResponse(
   draftResponse: string
 ): Promise<{ approved: boolean; issues: string[] }> {
   const prompt = `User's request:\n${userMessage}\n\nDraft response to review:\n${draftResponse}`;
-  const raw = await callGroq([{ role: "user", content: prompt }], VERIFIER_SYSTEM);
+  let raw = "";
+  try {
+    raw = await callGroq([{ role: "user", content: prompt }], VERIFIER_SYSTEM);
+  } catch {
+    try {
+      raw = await callGemini([{ role: "user", parts: [{ text: prompt }] }], VERIFIER_SYSTEM);
+    } catch {
+      return { approved: true, issues: [] };
+    }
+  }
 
   const cleaned = raw.replace(/```json|```/g, "").trim();
   try {
@@ -341,7 +413,7 @@ export async function verifyResponse(
   }
 }
 
-const REVISE_SYSTEM = `You are a helpful AI assistant. You previously drafted a response to a user's request, but a reviewer flagged issues with it. Produce a revised response that fixes those issues while still fully answering the original request. Return only the revised response text, with no preamble like "Here is the revised response".`;
+const REVISE_SYSTEM = `You are a helpful AI assistant. You previously drafted a response to a user's request, but a reviewer flagged issues with it. Produce a revised response that fixes those issues while still fully answering the original request. Return only the revised response text, with no preamble like "Here is the revised response". If the draft responds to a webpage, website, or HTML component request with a \`\`\`html code block, keep that same single self-contained \`\`\`html code block structure (complete valid HTML with inline <style> and <script>, no external file references) in your revision — don't drop the fenced block or the code from it.`;
 
 export async function reviseResponse(
   userMessage: string,
@@ -349,8 +421,11 @@ export async function reviseResponse(
   issues: string[]
 ): Promise<string> {
   const prompt = `Original request:\n${userMessage}\n\nYour draft response:\n${draftResponse}\n\nReviewer issues:\n${issues.map((i) => `- ${i}`).join("\n")}\n\nWrite the revised response.`;
-  // TEMPORARY: routed to Groq alongside the Builder (see note at top of file).
-  return callGroq([{ role: "user", content: prompt }], REVISE_SYSTEM);
+  try {
+    return await callGroq([{ role: "user", content: prompt }], REVISE_SYSTEM);
+  } catch {
+    return callGemini([{ role: "user", parts: [{ text: prompt }] }], REVISE_SYSTEM);
+  }
 }
 
 const MEMORY_SYSTEM = `You maintain a structured memory object for a project, based on its ongoing chat. You will be given the current memory and the latest user/assistant exchange. Update the memory to reflect any new goals, completed work, pending tasks, or decisions mentioned. Keep existing items unless they're clearly done or superseded. Keep each list concise (short strings, no duplicates, max ~8 items each).

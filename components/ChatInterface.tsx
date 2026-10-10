@@ -21,11 +21,13 @@ import {
   ChevronUp,
   Cpu,
   Zap,
+  Copy,
+  Check,
 } from "lucide-react";
 import type { Message, Project, ProjectMemory } from "@/types";
 import MemoryPanel from "@/components/MemoryPanel";
 import ExportModal from "@/components/ExportModal";
-import CodePreview from "@/components/CodePreview";
+import FormattedMessage from "@/components/FormattedMessage";
 import { useSpeechRecognition, speak, stopSpeaking } from "@/lib/voice";
 import { useWorkspace } from "@/components/WorkspaceLayout";
 
@@ -367,66 +369,6 @@ const PROVIDER_ROUTE_META: Record<NonNullable<Message["provider"]>, { emoji: str
   nvidia: { emoji: "🟩", label: "NVIDIA" },
 };
 
-function extractHtmlBlock(content: string): string | null {
-  if (!content) return null;
-
-  // 1. Look for ```html ... ``` fenced block first (most common case)
-  const htmlBlockRegex = /```html\b([\s\S]*?)```/i;
-  const match = content.match(htmlBlockRegex);
-  if (match && match[1]) {
-    const code = match[1].trim();
-    if (code) return code;
-  }
-
-  // 2. Look for any generic code block: ```[lang] ... ``` that contains HTML structures
-  const genericBlockRegex = /```[a-zA-Z0-9_-]*([\s\S]*?)```/g;
-  let blockMatch;
-  while ((blockMatch = genericBlockRegex.exec(content)) !== null) {
-    const code = blockMatch[1].trim();
-    const lowerCode = code.toLowerCase();
-    if (
-      lowerCode.includes("<!doctype html") ||
-      lowerCode.includes("<html") ||
-      (lowerCode.includes("<head") && lowerCode.includes("<body")) ||
-      lowerCode.includes("</html>") ||
-      lowerCode.includes("</body>")
-    ) {
-      return code;
-    }
-  }
-
-  // 3. Look for any HTML substring in the raw content starting with <!DOCTYPE html or <html and ending with </html> or </body>
-  const lowerContent = content.toLowerCase();
-  let startIdx = lowerContent.indexOf("<!doctype html");
-  if (startIdx === -1) {
-    startIdx = lowerContent.indexOf("<html");
-  }
-
-  if (startIdx !== -1) {
-    let endIdx = lowerContent.lastIndexOf("</html>");
-    if (endIdx !== -1) {
-      endIdx += 7; // include </html>
-    } else {
-      endIdx = lowerContent.lastIndexOf("</body>");
-      if (endIdx !== -1) {
-        endIdx += 7; // include </body>
-      }
-    }
-
-    if (endIdx !== -1 && endIdx > startIdx) {
-      return content.substring(startIdx, endIdx).trim();
-    }
-
-    // Fallback: If it's a long text starting with html tag but without a clean closing tag
-    if (lowerContent.length - startIdx > 100) {
-      return content.substring(startIdx).trim();
-    }
-  }
-
-  return null;
-}
-
-{/* Muted Subtle Message Item Component */}
 function MessageBubble({
   message,
   domain,
@@ -440,10 +382,20 @@ function MessageBubble({
 }) {
   const isUser = message.role === "user";
   const [showVerificationDetails, setShowVerificationDetails] = useState(false);
-  const extractedHtml = !isUser ? extractHtmlBlock(message.content) : null;
+  const [copiedMessage, setCopiedMessage] = useState(false);
+
+  const handleCopyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessage(true);
+      setTimeout(() => setCopiedMessage(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
 
   return (
-    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"} space-y-1.5 group`}>
+    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"} space-y-1.5 group w-full`}>
       {/* Message Header Badge */}
       <div className="flex items-center gap-1.5 px-1 text-[11px] text-gray-400 font-medium">
         {isUser ? (
@@ -454,7 +406,7 @@ function MessageBubble({
         ) : (
           <>
             <Bot className="w-3.5 h-3.5 text-violet-400" />
-            <span className="text-gray-300 font-medium">AI Assistant</span>
+            <span className="text-gray-300 font-medium">Assistant</span>
             {message.verification && (
               <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.2 rounded bg-white/5 text-emerald-400 border border-emerald-500/20">
                 <CheckCircle2 className="w-2.5 h-2.5" /> Verified
@@ -466,45 +418,63 @@ function MessageBubble({
 
       {/* Message Bubble Container */}
       <div
-        className={`relative max-w-[88%] md:max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed ${
+        className={`relative w-full max-w-[94%] md:max-w-[85%] rounded-2xl px-4 py-3.5 text-sm leading-relaxed transition-all ${
           isUser
-            ? "bg-white/[0.08] text-white border border-white/10 rounded-tr-xs"
-            : "glass-card border border-white/[0.06] text-gray-200 rounded-tl-xs"
+            ? "bg-white/[0.08] text-white border border-white/10 rounded-tr-sm ml-auto"
+            : "glass-card border border-white/[0.07] text-gray-200 rounded-tl-sm shadow-md"
         }`}
       >
         <div className="flex items-start justify-between gap-3">
-          <div className="whitespace-pre-wrap flex-1">{message.content}</div>
+          <div className="flex-1 min-w-0">
+            <FormattedMessage content={message.content} isUser={isUser} />
+          </div>
 
-          {/* Voice Text-To-Speech Toggle */}
+          {/* Quick Action Toolbar on Assistant Messages */}
           {!isUser && (
-            <button
-              onClick={() => onToggleSpeak(message.id, message.content)}
-              title={speakingId === message.id ? "Stop reading" : "Read aloud"}
-              className="p-1 rounded text-gray-400 hover:text-white hover:bg-white/10 transition-colors shrink-0"
-            >
-              {speakingId === message.id ? (
-                <VolumeX className="w-3.5 h-3.5 text-pink-400 animate-pulse" />
-              ) : (
-                <Volume2 className="w-3.5 h-3.5" />
-              )}
-            </button>
+            <div className="flex items-center gap-1 opacity-60 hover:opacity-100 transition-opacity shrink-0 ml-2">
+              <button
+                type="button"
+                onClick={handleCopyMessage}
+                title="Copy entire response"
+                className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+              >
+                {copiedMessage ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onToggleSpeak(message.id, message.content)}
+                title={speakingId === message.id ? "Stop reading" : "Read aloud"}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+              >
+                {speakingId === message.id ? (
+                  <VolumeX className="w-3.5 h-3.5 text-pink-400 animate-pulse" />
+                ) : (
+                  <Volume2 className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
           )}
         </div>
       </div>
 
       {/* Smart Provider Routing Badge */}
       {!isUser && message.provider && (
-        <div className="max-w-[88%] md:max-w-[80%] flex items-center gap-1 px-1 text-[10px] text-gray-500">
+        <div className="max-w-[94%] md:max-w-[85%] flex items-center gap-1.5 px-1 text-[11px] text-gray-500 font-mono">
           <span>{PROVIDER_ROUTE_META[message.provider].emoji}</span>
           <span>
-            Routed to {PROVIDER_ROUTE_META[message.provider].label} — optimized for {domain} tasks
+            {PROVIDER_ROUTE_META[message.provider].label} · {domain} Mode
           </span>
         </div>
       )}
 
       {/* Verification Audit Breakdown Dropdown */}
       {message.verification && (
-        <div className="max-w-[88%] md:max-w-[80%] text-xs">
+        <div className="max-w-[94%] md:max-w-[85%] text-xs">
           <button
             onClick={() => setShowVerificationDetails((prev) => !prev)}
             className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-200 transition-colors py-0.5"
@@ -523,32 +493,32 @@ function MessageBubble({
           </button>
 
           {showVerificationDetails && (
-            <div className="mt-1 p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06] space-y-2 text-gray-300">
+            <div className="mt-1.5 p-3 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-2.5 text-gray-300">
               {message.verification.plan && (
-                <div className="space-y-0.5">
-                  <span className="text-[10px] uppercase font-semibold text-gray-400">Planner:</span>
-                  <p className="text-xs text-gray-400 whitespace-pre-wrap">{message.verification.plan}</p>
+                <div className="space-y-1">
+                  <span className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider">Planner Approach:</span>
+                  <p className="text-xs text-gray-300 whitespace-pre-wrap leading-relaxed">{message.verification.plan}</p>
                 </div>
               )}
-              <div className="space-y-0.5">
-                <span className="text-[10px] uppercase font-semibold text-gray-400">Builder → Verifier:</span>
+              <div className="space-y-1">
+                <span className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider">Verification Result:</span>
                 <div className="flex items-center gap-1.5 font-medium text-[11px] text-emerald-400">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Verification Status: {message.verification.status.toUpperCase()}</span>
+                  <span>{message.verification.status.toUpperCase()}</span>
                 </div>
                 {message.verification.verifierProvider && (
                   <div className="text-[10px] text-gray-500">
                     {message.verification.builderProvider &&
                     message.verification.builderProvider !== message.verification.verifierProvider
-                      ? `Reviewed by ${message.verification.verifierProvider} — cross-provider check`
-                      : `Reviewed by ${message.verification.verifierProvider}`}
+                      ? `Audited by ${message.verification.verifierProvider} (cross-provider check)`
+                      : `Audited by ${message.verification.verifierProvider}`}
                   </div>
                 )}
               </div>
               {message.verification.issues && message.verification.issues.length > 0 && (
-                <div className="space-y-0.5">
-                  <span className="text-[10px] uppercase font-semibold text-gray-400">Addressed Issues:</span>
-                  <ul className="list-disc list-inside space-y-0.5 text-xs text-gray-400">
+                <div className="space-y-1">
+                  <span className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider">Addressed Improvements:</span>
+                  <ul className="list-disc list-inside space-y-0.5 text-xs text-gray-300">
                     {message.verification.issues.map((issue, idx) => (
                       <li key={idx}>{issue}</li>
                     ))}
@@ -557,13 +527,6 @@ function MessageBubble({
               )}
             </div>
           )}
-        </div>
-      )}
-
-      {/* Code Live Preview */}
-      {extractedHtml && (
-        <div className="w-full max-w-[88%] md:max-w-[80%]">
-          <CodePreview code={extractedHtml} />
         </div>
       )}
     </div>
