@@ -19,6 +19,21 @@ export interface VerificationInfo {
   verifierProvider?: string;
 }
 
+/** Metadata stored in SQLite — NO content or base64, just enough to render chips. */
+export interface AttachmentMeta {
+  name: string;
+  type: "text" | "image";
+  size: number; // bytes (original)
+}
+
+/** Payload sent from client to API — includes actual content for processing. */
+export interface AttachmentPayload {
+  name: string;
+  type: "text" | "image";
+  mimeType: string;
+  content: string; // plain text for text files, base64 for images
+}
+
 export interface Message {
   id: string;
   projectId: string;
@@ -26,6 +41,7 @@ export interface Message {
   content: string;
   verification?: VerificationInfo | null;
   provider?: "gemini" | "groq" | "nvidia";
+  attachments?: AttachmentMeta[];
   createdAt: string;
 }
 

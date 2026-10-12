@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
   Mic,
@@ -23,13 +23,106 @@ import {
   Zap,
   Copy,
   Check,
+  Paperclip,
+  X,
+  FileText,
+  Image as ImageIcon,
 } from "lucide-react";
-import type { Message, Project, ProjectMemory } from "@/types";
+import type { Message, Project, ProjectMemory, AttachmentMeta, AttachmentPayload } from "@/types";
 import MemoryPanel from "@/components/MemoryPanel";
 import ExportModal from "@/components/ExportModal";
 import FormattedMessage from "@/components/FormattedMessage";
 import { useSpeechRecognition, speak, stopSpeaking } from "@/lib/voice";
 import { useWorkspace } from "@/components/WorkspaceLayout";
+
+// ── File extension / MIME helpers ──────────────────────────────────────────
+
+const TEXT_EXTENSIONS = new Set([
+  ".txt", ".md", ".json", ".csv", ".js", ".jsx", ".ts", ".tsx",
+  ".py", ".html", ".css", ".java", ".c", ".cpp", ".sql", ".yaml", ".yml",
+]);
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+const UNSUPPORTED_DOC_EXTENSIONS = new Set([".pdf", ".docx", ".xlsx", ".doc", ".xls", ".pptx"]);
+
+const MAX_TEXT_SIZE = 200 * 1024;      // 200 KB
+const MAX_IMAGE_SIZE = 4 * 1024 * 1024; // 4 MB
+const MAX_TEXT_CHARS = 20_000;
+const MAX_ATTACHMENTS = 3;
+const MAX_IMAGE_DIMENSION = 1568;
+
+function getExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+function getMimeType(file: File, ext: string): string {
+  if (file.type) return file.type;
+  // Fallback guesses for common types where browser might not set it
+  const map: Record<string, string> = {
+    ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json",
+    ".csv": "text/csv", ".js": "text/javascript", ".jsx": "text/jsx",
+    ".ts": "text/typescript", ".tsx": "text/tsx", ".py": "text/x-python",
+    ".html": "text/html", ".css": "text/css", ".java": "text/x-java",
+    ".c": "text/x-c", ".cpp": "text/x-c++", ".sql": "application/sql",
+    ".yaml": "text/yaml", ".yml": "text/yaml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Staged attachment (client-side, before sending) ────────────────────────
+
+interface StagedAttachment {
+  id: string;
+  file: File;
+  name: string;
+  ext: string;
+  type: "text" | "image";
+  mimeType: string;
+  size: number;
+  /** Resolved content: plain text for text files, base64 for images */
+  content: string;
+  /** For images: object URL for preview thumbnail */
+  previewUrl?: string;
+  /** If file was truncated */
+  truncated?: boolean;
+}
+
+// ── Image downscaling ──────────────────────────────────────────────────────
+
+function downscaleImage(file: File): Promise<{ base64: string; previewUrl: string }> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      let { width, height } = img;
+      if (Math.max(width, height) > MAX_IMAGE_DIMENSION) {
+        const scale = MAX_IMAGE_DIMENSION / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("Canvas not supported")); return; }
+      ctx.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      const base64 = dataUrl.split(",")[1];
+      resolve({ base64, previewUrl: objectUrl });
+    };
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load image")); };
+    img.src = objectUrl;
+  });
+}
+
+// ── Main component ─────────────────────────────────────────────────────────
 
 export default function ChatInterface({
   project,
@@ -48,12 +141,22 @@ export default function ChatInterface({
   const [verificationMode, setVerificationMode] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [stagedAttachments, setStagedAttachments] = useState<StagedAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  // Track per-message staged attachments for rendering in sent user bubbles
+  const [sentAttachments, setSentAttachments] = useState<
+    Record<string, StagedAttachment[]>
+  >({});
 
   const { contextPanelOpen, toggleContextPanel } = useWorkspace();
   const { isListening, isSupported, startListening, stopListening } = useSpeechRecognition();
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const chatAreaRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -62,6 +165,113 @@ export default function ChatInterface({
   useEffect(() => {
     scrollToBottom();
   }, [messages, isLoading]);
+
+  // ── File processing ────────────────────────────────────────────────────
+
+  const processFiles = useCallback(async (files: FileList | File[]) => {
+    setAttachError(null);
+    const fileArray = Array.from(files);
+
+    for (const file of fileArray) {
+      if (stagedAttachments.length >= MAX_ATTACHMENTS) {
+        setAttachError(`Maximum ${MAX_ATTACHMENTS} attachments allowed.`);
+        break;
+      }
+
+      const ext = getExtension(file.name);
+
+      // Unsupported document types
+      if (UNSUPPORTED_DOC_EXTENSIONS.has(ext)) {
+        setAttachError(`${ext.toUpperCase().slice(1)} files are not supported yet. Try text/code files or images.`);
+        continue;
+      }
+
+      const isText = TEXT_EXTENSIONS.has(ext);
+      const isImage = IMAGE_EXTENSIONS.has(ext);
+
+      if (!isText && !isImage) {
+        setAttachError(`"${ext || file.name}" is not a supported file type. Try .txt, .js, .py, .png, .jpg, etc.`);
+        continue;
+      }
+
+      // Size checks
+      if (isText && file.size > MAX_TEXT_SIZE) {
+        setAttachError(`${file.name} is too large (${formatSize(file.size)}). Text files must be under 200 KB.`);
+        continue;
+      }
+      if (isImage && file.size > MAX_IMAGE_SIZE) {
+        setAttachError(`${file.name} is too large (${formatSize(file.size)}). Images must be under 4 MB.`);
+        continue;
+      }
+
+      const mimeType = getMimeType(file, ext);
+
+      try {
+        if (isText) {
+          const rawText = await file.text();
+          let content = rawText;
+          let truncated = false;
+          if (rawText.length > MAX_TEXT_CHARS) {
+            content = rawText.slice(0, MAX_TEXT_CHARS);
+            truncated = true;
+          }
+          const staged: StagedAttachment = {
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            file, name: file.name, ext, type: "text", mimeType,
+            size: file.size, content, truncated,
+          };
+          setStagedAttachments((prev) => [...prev, staged]);
+          if (truncated) {
+            setAttachError(`${file.name} was truncated to 20,000 characters.`);
+          }
+        } else {
+          const { base64, previewUrl } = await downscaleImage(file);
+          const staged: StagedAttachment = {
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            file, name: file.name, ext, type: "image", mimeType: "image/jpeg",
+            size: file.size, content: base64, previewUrl,
+          };
+          setStagedAttachments((prev) => [...prev, staged]);
+        }
+      } catch {
+        setAttachError(`Failed to read ${file.name}.`);
+      }
+    }
+  }, [stagedAttachments.length]);
+
+  function removeAttachment(id: string) {
+    setStagedAttachments((prev) => {
+      const removed = prev.find((a) => a.id === id);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter((a) => a.id !== id);
+    });
+    setAttachError(null);
+  }
+
+  // ── Drag and drop ──────────────────────────────────────────────────────
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    if (e.dataTransfer.files.length > 0) {
+      processFiles(e.dataTransfer.files);
+    }
+  }, [processFiles]);
+
+  // ── Voice / speak ──────────────────────────────────────────────────────
 
   function handleMicClick() {
     if (isListening) {
@@ -84,31 +294,61 @@ export default function ChatInterface({
     speak(content, () => setSpeakingId(null));
   }
 
+  // ── Send ───────────────────────────────────────────────────────────────
+
   async function handleSend() {
     const text = input.trim();
     if (!text || isLoading) return;
 
     setInput("");
     setError(null);
+    setAttachError(null);
 
+    // Capture current staged attachments and clear
+    const currentAttachments = [...stagedAttachments];
+    setStagedAttachments([]);
+
+    const optimisticId = `local-${Date.now()}`;
     const optimisticUserMessage: Message = {
-      id: `local-${Date.now()}`,
+      id: optimisticId,
       projectId: project.id,
       role: "user",
       content: text,
       verification: null,
+      attachments: currentAttachments.map((a) => ({
+        name: a.name,
+        type: a.type,
+        size: a.size,
+      })),
       createdAt: new Date().toISOString(),
     };
+
+    // Store staged attachments so message bubble can show previews
+    if (currentAttachments.length > 0) {
+      setSentAttachments((prev) => ({ ...prev, [optimisticId]: currentAttachments }));
+    }
 
     setMessages((prev) => [...prev, optimisticUserMessage]);
     setIsLoading(true);
 
     try {
+      // Build payload attachments
+      const payloadAttachments: AttachmentPayload[] = currentAttachments.map((a) => ({
+        name: a.name,
+        type: a.type,
+        mimeType: a.mimeType,
+        content: a.content,
+      }));
+
       const endpoint = verificationMode ? "/api/verify" : "/api/chat";
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: project.id, message: text }),
+        body: JSON.stringify({
+          projectId: project.id,
+          message: text,
+          attachments: payloadAttachments.length > 0 ? payloadAttachments : undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -131,7 +371,23 @@ export default function ChatInterface({
   }
 
   return (
-    <div className="relative flex flex-1 h-full w-full overflow-hidden bg-[#08080a]">
+    <div
+      className="relative flex flex-1 h-full w-full overflow-hidden bg-[#08080a]"
+      ref={chatAreaRef}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag-over overlay */}
+      {isDragOver && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-violet-500/10 border-2 border-dashed border-violet-400/40 rounded-xl pointer-events-none">
+          <div className="flex flex-col items-center gap-2 text-violet-300">
+            <Paperclip className="w-8 h-8" />
+            <span className="text-sm font-medium">Drop files here to attach</span>
+          </div>
+        </div>
+      )}
+
       {/* Central Conversation Workspace */}
       <div className="flex-1 flex flex-col h-full min-w-0 relative">
         {/* Workspace Top Header Bar */}
@@ -236,6 +492,7 @@ export default function ChatInterface({
               domain={project.domain}
               speakingId={speakingId}
               onToggleSpeak={handleToggleSpeak}
+              stagedAttachments={sentAttachments[message.id]}
             />
           ))}
 
@@ -270,7 +527,73 @@ export default function ChatInterface({
         {/* Dedicated Flex Bottom Composer (Never overlaps or collapses text) */}
         <div className="shrink-0 w-full p-3 md:p-4 border-t border-white/[0.06] bg-[#08080a]/90 backdrop-blur-md z-10 flex justify-center">
           <div className="w-full max-w-3xl composer-glass rounded-xl p-2">
+            {/* Attachment chips strip */}
+            {(stagedAttachments.length > 0 || attachError) && (
+              <div className="px-2 pb-2 space-y-2">
+                {stagedAttachments.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {stagedAttachments.map((att) => (
+                      <div
+                        key={att.id}
+                        className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-gray-300 max-w-[200px]"
+                      >
+                        {att.type === "image" && att.previewUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={att.previewUrl}
+                            alt={att.name}
+                            className="w-6 h-6 rounded object-cover shrink-0"
+                          />
+                        ) : (
+                          <FileText className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                        )}
+                        <span className="truncate">{att.name}</span>
+                        <span className="text-[10px] text-gray-500 shrink-0">{formatSize(att.size)}</span>
+                        {att.truncated && (
+                          <span className="text-[10px] text-amber-400 shrink-0">truncated</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(att.id)}
+                          className="p-0.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors shrink-0"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {attachError && (
+                  <div className="flex items-center gap-1.5 text-[11px] text-amber-300">
+                    <AlertTriangle className="w-3 h-3 shrink-0" />
+                    <span>{attachError}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex items-end gap-2">
+              {/* Attach (Paperclip) Button */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach file or image"
+                className="p-2 rounded-lg bg-white/5 border border-white/10 text-gray-400 hover:text-white transition-colors shrink-0"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                accept={[...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS].join(",")}
+                onChange={(e) => {
+                  if (e.target.files) processFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+
               {/* Voice Speech Dictation Trigger */}
               <button
                 onClick={handleMicClick}
@@ -363,22 +686,74 @@ export default function ChatInterface({
   );
 }
 
+// ── Provider badge data ────────────────────────────────────────────────────
+
 const PROVIDER_ROUTE_META: Record<NonNullable<Message["provider"]>, { emoji: string; label: string }> = {
   groq: { emoji: "⚡", label: "Groq" },
   gemini: { emoji: "🧠", label: "Gemini" },
   nvidia: { emoji: "🟩", label: "NVIDIA" },
 };
 
+// ── Attachment chips inside sent messages ───────────────────────────────────
+
+function AttachmentChips({
+  meta,
+  staged,
+}: {
+  meta?: AttachmentMeta[];
+  staged?: StagedAttachment[];
+}) {
+  if (!meta || meta.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-white/[0.06]">
+      {meta.map((att, idx) => {
+        const stagedMatch = staged?.find((s) => s.name === att.name && s.type === att.type);
+        return (
+          <div
+            key={idx}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white/[0.04] border border-white/[0.06] text-[11px] text-gray-400"
+          >
+            {att.type === "image" ? (
+              stagedMatch?.previewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={stagedMatch.previewUrl}
+                  alt={att.name}
+                  className="w-8 h-8 rounded object-cover shrink-0"
+                />
+              ) : (
+                <div className="flex items-center gap-1 text-gray-500">
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  <span className="italic">image not stored</span>
+                </div>
+              )
+            ) : (
+              <FileText className="w-3 h-3 text-gray-500 shrink-0" />
+            )}
+            <span className="truncate max-w-[120px]">{att.name}</span>
+            <span className="text-[10px] text-gray-500">{formatSize(att.size)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Message bubble ─────────────────────────────────────────────────────────
+
 function MessageBubble({
   message,
   domain,
   speakingId,
   onToggleSpeak,
+  stagedAttachments,
 }: {
   message: Message;
   domain: Project["domain"];
   speakingId: string | null;
   onToggleSpeak: (id: string, content: string) => void;
+  stagedAttachments?: StagedAttachment[];
 }) {
   const isUser = message.role === "user";
   const [showVerificationDetails, setShowVerificationDetails] = useState(false);
@@ -427,6 +802,13 @@ function MessageBubble({
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
             <FormattedMessage content={message.content} isUser={isUser} />
+            {/* Attachment chips inside the bubble */}
+            {isUser && (
+              <AttachmentChips
+                meta={message.attachments}
+                staged={stagedAttachments}
+              />
+            )}
           </div>
 
           {/* Quick Action Toolbar on Assistant Messages */}

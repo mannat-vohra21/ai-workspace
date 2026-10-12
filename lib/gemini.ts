@@ -18,7 +18,7 @@
 //      (wrap the prompt in `[{ role: "user", parts: [{ text: prompt }] }]`).
 //   (verifyResponse() stays on Groq permanently — that's the intentional cross-provider check.)
 //   Call isGeminiAvailable() to confirm GEMINI_API_KEY is set before flipping any of the above.
-import type { Message, ProjectMemory, VerificationInfo } from "@/types";
+import type { AttachmentPayload, Message, ProjectMemory, VerificationInfo } from "@/types";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -56,14 +56,20 @@ function buildApiError(status: number, provider: "Gemini" | "Groq" | "NVIDIA", r
   return new Error("AI service request failed. Please try again in a moment.");
 }
 
+interface GeminiPart {
+  text?: string;
+  inlineData?: { mimeType: string; data: string };
+}
+
 interface GeminiContent {
   role: "user" | "model";
-  parts: { text: string }[];
+  parts: GeminiPart[];
 }
 
 async function callGemini(
   contents: GeminiContent[],
-  systemInstruction?: string
+  systemInstruction?: string,
+  modelOverride?: string
 ): Promise<string> {
   if (!API_KEY) {
     throw new Error(
@@ -73,7 +79,8 @@ async function callGemini(
 
   await waitForCooldown("gemini");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}`;
+  const model = modelOverride || MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`;
 
   const body: Record<string, unknown> = { contents };
   if (systemInstruction) {
@@ -98,6 +105,40 @@ async function callGemini(
     throw new Error("The AI didn't return a response. Please try again.");
   }
   return text.trim();
+}
+
+/** Build a Gemini-format user message that includes image inlineData parts. */
+function buildGeminiVisionParts(text: string, imageAttachments: AttachmentPayload[]): GeminiPart[] {
+  const parts: GeminiPart[] = [];
+  for (const img of imageAttachments) {
+    parts.push({
+      inlineData: {
+        mimeType: img.mimeType,
+        data: img.content, // base64
+      },
+    });
+  }
+  parts.push({ text });
+  return parts;
+}
+
+/**
+ * Send a prompt with image attachments through Gemini's vision-capable model.
+ * gemini-flash-latest supports image input natively via inlineData.
+ */
+async function callGeminiWithVision(
+  history: GeminiContent[],
+  userText: string,
+  imageAttachments: AttachmentPayload[],
+  systemInstruction?: string
+): Promise<string> {
+  const userParts = buildGeminiVisionParts(userText, imageAttachments);
+  const contents: GeminiContent[] = [
+    ...history,
+    { role: "user", parts: userParts },
+  ];
+  // gemini-flash-latest supports vision natively — no model override needed
+  return callGemini(contents, systemInstruction);
 }
 
 function historyToContents(history: Message[]): GeminiContent[] {
@@ -305,11 +346,36 @@ export async function generateBuilderResponse(
   history: Message[],
   userMessage: string,
   domain: string,
-  plan?: string
+  plan?: string,
+  attachments?: AttachmentPayload[]
 ): Promise<{ text: string; provider: BuilderProvider }> {
   const latestMessage = plan
     ? `${userMessage}\n\n(Your approach plan for this response: ${plan})`
     : userMessage;
+
+  // If the request includes image attachments, override routing to Gemini (vision-capable).
+  const imageAttachments = attachments?.filter((a) => a.type === "image") ?? [];
+  if (imageAttachments.length > 0) {
+    if (!isGeminiAvailable()) {
+      throw new Error(
+        "Image understanding is unavailable right now. Try again later or attach text instead."
+      );
+    }
+    try {
+      const text = await callGeminiWithVision(
+        historyToContents(history),
+        latestMessage,
+        imageAttachments,
+        BUILDER_SYSTEM
+      );
+      return { text, provider: "gemini" };
+    } catch (err) {
+      console.error("Vision call failed:", err instanceof Error ? err.message : err);
+      throw new Error(
+        "Image understanding is unavailable right now. Try again later or attach text instead."
+      );
+    }
+  }
 
   const selected = selectBuilderProvider(domain);
 
@@ -492,11 +558,22 @@ export interface VerifiedBuildResult {
 export async function runVerifiedBuild(
   history: Message[],
   userMessage: string,
-  domain: string
+  domain: string,
+  attachments?: AttachmentPayload[]
 ): Promise<VerifiedBuildResult> {
-  const plan = await generatePlan(history, userMessage);
-  const builderResult = await generateBuilderResponse(history, userMessage, domain, plan);
-  const review = await verifyResponse(userMessage, builderResult.text);
+  // Council Mode: Planner and Verifier are text-only.
+  // Give them a note about images; include text attachments in full.
+  const imageAttachments = attachments?.filter((a) => a.type === "image") ?? [];
+  const imageNote = imageAttachments.length > 0
+    ? `\n\n[User attached ${imageAttachments.length} image(s): ${imageAttachments.map((a) => a.name).join(", ")}]`
+    : "";
+  const plannerMessage = userMessage + imageNote;
+
+  const plan = await generatePlan(history, plannerMessage);
+  // Builder gets full attachments (including images for vision)
+  const builderResult = await generateBuilderResponse(history, userMessage, domain, plan, attachments);
+  // Verifier gets text-only: no images
+  const review = await verifyResponse(plannerMessage, builderResult.text);
 
   if (review.approved) {
     return {
@@ -511,7 +588,7 @@ export async function runVerifiedBuild(
     };
   }
 
-  const revised = await reviseResponse(userMessage, builderResult.text, review.issues);
+  const revised = await reviseResponse(plannerMessage, builderResult.text, review.issues);
   return {
     finalText: revised,
     provider: builderResult.provider,

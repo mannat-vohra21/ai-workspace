@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
-import type { Domain, Message, Project, ProjectMemory, VerificationInfo } from "@/types";
+import type { AttachmentMeta, Domain, Message, Project, ProjectMemory, VerificationInfo } from "@/types";
 import { EMPTY_MEMORY } from "@/types";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -43,6 +43,9 @@ function initDb(): Database.Database {
   if (!messageColumns.some((c) => c.name === "provider")) {
     db.exec("ALTER TABLE messages ADD COLUMN provider TEXT");
   }
+  if (!messageColumns.some((c) => c.name === "attachments")) {
+    db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT");
+  }
 
   return db;
 }
@@ -71,6 +74,7 @@ interface MessageRow {
   content: string;
   verification: string | null;
   provider: string | null;
+  attachments: string | null;
   created_at: string;
 }
 
@@ -85,6 +89,14 @@ function rowToProject(row: ProjectRow): Project {
 }
 
 function rowToMessage(row: MessageRow): Message {
+  let attachments: AttachmentMeta[] | undefined;
+  if (row.attachments) {
+    try {
+      attachments = JSON.parse(row.attachments) as AttachmentMeta[];
+    } catch {
+      attachments = undefined;
+    }
+  }
   return {
     id: row.id,
     projectId: row.project_id,
@@ -92,6 +104,7 @@ function rowToMessage(row: MessageRow): Message {
     content: row.content,
     verification: row.verification ? (JSON.parse(row.verification) as VerificationInfo) : null,
     provider: (row.provider as Message["provider"]) ?? undefined,
+    attachments,
     createdAt: row.created_at,
   };
 }
@@ -160,11 +173,13 @@ export function addMessage(input: {
   content: string;
   verification?: VerificationInfo | null;
   provider?: Message["provider"] | null;
+  attachments?: AttachmentMeta[];
 }): Message {
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
+  const attachmentsJson = input.attachments?.length ? JSON.stringify(input.attachments) : null;
   db.prepare(
-    "INSERT INTO messages (id, project_id, role, content, verification, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO messages (id, project_id, role, content, verification, provider, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(
     id,
     input.projectId,
@@ -172,6 +187,7 @@ export function addMessage(input: {
     input.content,
     input.verification ? JSON.stringify(input.verification) : null,
     input.provider ?? null,
+    attachmentsJson,
     createdAt
   );
   return {
@@ -181,6 +197,7 @@ export function addMessage(input: {
     content: input.content,
     verification: input.verification ?? null,
     provider: input.provider ?? undefined,
+    attachments: input.attachments,
     createdAt,
   };
 }
