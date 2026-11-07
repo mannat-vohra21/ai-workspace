@@ -1,6 +1,6 @@
 "use client";
 
-import { Target, CheckCircle2, ListTodo, Lightbulb, Share2, Sparkles } from "lucide-react";
+import { Target, CheckCircle2, ListTodo, Lightbulb, Share2, Sparkles, X } from "lucide-react";
 import type { ProjectMemory } from "@/types";
 
 function Section({
@@ -76,16 +76,27 @@ export default function MemoryPanel({
           </div>
         </div>
 
-        {onExport && (
-          <button
-            onClick={onExport}
-            title="Export Context Summary"
-            className="flex items-center gap-1 text-[11px] font-medium text-violet-400 hover:text-violet-300 bg-violet-500/10 border border-violet-500/20 px-2.5 py-1 rounded-lg transition-colors"
-          >
-            <Share2 className="w-3 h-3" />
-            Export
-          </button>
-        )}
+        <div className="flex items-center gap-1.5">
+          {onExport && (
+            <button
+              onClick={onExport}
+              title="Export Context Summary"
+              className="flex items-center gap-1 text-[11px] font-medium text-violet-400 hover:text-violet-300 bg-violet-500/10 border border-violet-500/20 px-2.5 py-1 rounded-lg transition-colors"
+            >
+              <Share2 className="w-3 h-3" />
+              Export
+            </button>
+          )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              title="Close panel"
+              className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Memory Sections Body */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Eye, ExternalLink, Download, Check, Loader2 } from "lucide-react";
 import { downloadProjectZip } from "@/lib/exportZip";
 
@@ -26,7 +26,7 @@ function buildExecutableHtml(rawCode: string, lang?: string): string {
   if (isReact) {
     // Clean React code for Babel browser runtime:
     // 1. Remove import statements that Babel standalone in browser can't resolve natively
-    let clientCode = trimmed
+    const clientCode = trimmed
       .replace(/import\s+React\s*(?:,\s*\{[^}]*\})?\s*from\s*['"][^'"]*['"];?/g, "")
       .replace(/import\s*\{[^}]*\}\s*from\s*['"][^'"]*['"];?/g, "")
       .replace(/import\s+[^'"]*\s*from\s*['"][^'"]*['"];?/g, "")
@@ -165,7 +165,7 @@ function buildExecutableHtml(rawCode: string, lang?: string): string {
   }
 
   // Standard HTML page: inject Tailwind CDN and color guard if missing
-  let html = trimmed;
+  const html = trimmed;
   const tailwindCdn = '<script src="https://cdn.tailwindcss.com"></script>';
   const colorGuard = '<meta name="color-scheme" content="light"><style>html,body{color-scheme:light;background:#ffffff;color:#111111;}body{min-height:100vh;}</style>';
 
@@ -196,7 +196,6 @@ export default function CodePreview({
   embedded = false,
   title = "Fashion Project",
 }: CodePreviewProps) {
-  const [blobUrl, setBlobUrl] = useState<string>("");
   const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const [downloadedZip, setDownloadedZip] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -213,21 +212,12 @@ export default function CodePreview({
     });
   };
 
-  useEffect(() => {
+  const handleOpenInNewTab = () => {
     if (!executableHtml) return;
     const blob = new Blob([executableHtml], { type: "text/html" });
     const url = URL.createObjectURL(blob);
-    setBlobUrl(url);
-
-    return () => {
-      URL.revokeObjectURL(url);
-    };
-  }, [executableHtml]);
-
-  const handleOpenInNewTab = () => {
-    if (blobUrl) {
-      window.open(blobUrl, "_blank");
-    }
+    window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   };
 
   const handleDownloadZip = async () => {

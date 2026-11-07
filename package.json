@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node test_suite.mjs"
   },
   "dependencies": {
     "@types/jszip": "^3.4.0",

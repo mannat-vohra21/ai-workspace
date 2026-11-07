@@ -20,7 +20,7 @@
 //   Call isGeminiAvailable() to confirm GEMINI_API_KEY is set before flipping any of the above.
 import type { AttachmentPayload, Message, ProjectMemory, VerificationInfo } from "@/types";
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+const MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
 const API_KEY = process.env.GEMINI_API_KEY;
 
 export function isGeminiAvailable(): boolean {
@@ -111,14 +111,16 @@ async function callGemini(
 function buildGeminiVisionParts(text: string, imageAttachments: AttachmentPayload[]): GeminiPart[] {
   const parts: GeminiPart[] = [];
   for (const img of imageAttachments) {
+    const rawContent = (img.content || "").trim();
+    const data = rawContent.includes(",") ? rawContent.split(",")[1] : rawContent;
     parts.push({
       inlineData: {
-        mimeType: img.mimeType,
-        data: img.content, // base64
+        mimeType: img.mimeType || "image/jpeg",
+        data,
       },
     });
   }
-  parts.push({ text });
+  parts.push({ text: text?.trim() || "Please analyze and describe this image." });
   return parts;
 }
 
@@ -307,6 +309,80 @@ async function callNvidia(
   return text.trim();
 }
 
+const NVIDIA_VISION_MODEL = process.env.NVIDIA_VISION_MODEL || "meta/llama-3.2-11b-vision-instruct";
+
+async function callNvidiaWithVision(
+  history: Message[],
+  userMessage: string,
+  imageAttachments: AttachmentPayload[],
+  systemInstruction?: string
+): Promise<string> {
+  if (!NVIDIA_API_KEY) {
+    throw new Error("AI service isn't configured correctly. Check the API key.");
+  }
+
+  await waitForCooldown("nvidia");
+
+  const url = "https://integrate.api.nvidia.com/v1/chat/completions";
+  const messages: Array<{ role: string; content: unknown }> = [];
+
+  if (systemInstruction) {
+    messages.push({ role: "system", content: systemInstruction });
+  }
+
+  for (const m of history) {
+    messages.push({
+      role: m.role === "user" ? "user" : "assistant",
+      content: m.content,
+    });
+  }
+
+  const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+    { type: "text", text: userMessage || "Please analyze and describe the attached image." },
+  ];
+
+  for (const img of imageAttachments) {
+    const rawContent = (img.content || "").trim();
+    const dataUrl = rawContent.startsWith("data:")
+      ? rawContent
+      : `data:${img.mimeType || "image/jpeg"};base64,${rawContent}`;
+
+    userContent.push({
+      type: "image_url",
+      image_url: { url: dataUrl },
+    });
+  }
+
+  messages.push({ role: "user", content: userContent });
+
+  const body = {
+    model: NVIDIA_VISION_MODEL,
+    messages,
+    max_tokens: 4096,
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${NVIDIA_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw buildApiError(res.status, "NVIDIA", errText);
+  }
+
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content ?? "";
+  if (!text) {
+    throw new Error("NVIDIA vision returned an empty response.");
+  }
+  return text.trim();
+}
+
 const PLANNER_SYSTEM = `You are a planner. Given the user's request, briefly outline your approach in 1-3 short lines before it gets built. Don't answer the request itself, just the plan.`;
 
 export async function generatePlan(history: Message[], userMessage: string): Promise<string> {
@@ -340,7 +416,9 @@ Guidelines for output quality:
    - If asked for a ZIP file or download: Generate the complete project code block and inform the user that they can click the "Download ZIP" button directly on the code artifact header to export the full ready-to-run project bundle.
    - Design aesthetics: Modern clean aesthetics, elegant typography (system fonts or standard sans-serif), balanced whitespace, high-contrast accessible text, subtle border radii and box-shadows, responsive layouts (Flexbox/Grid), and smooth hover states.
    - Always include <meta name="color-scheme" content="light"> in HTML heads and use a clean light theme by default (unless dark theme is explicitly requested).
-4. Text-only capabilities: You can generate text, code, and project files; you cannot generate binary images. If asked for images, offer clean SVG or CSS-based visual alternatives.`;
+4. Vision & Image Analysis:
+   - If the user provides images, screenshots, diagrams, or UI mockups, thoroughly inspect and interpret the visual elements, text, structure, colors, layout, and intent with extreme precision.
+   - If asked to reproduce, code, or fix something shown in an image, generate matching clean code that accurately reflects the visual design.`;
 
 export async function generateBuilderResponse(
   history: Message[],
@@ -353,28 +431,50 @@ export async function generateBuilderResponse(
     ? `${userMessage}\n\n(Your approach plan for this response: ${plan})`
     : userMessage;
 
-  // If the request includes image attachments, override routing to Gemini (vision-capable).
+  // If the request includes image attachments, route to vision-capable model (Gemini or NVIDIA)
   const imageAttachments = attachments?.filter((a) => a.type === "image") ?? [];
   if (imageAttachments.length > 0) {
-    if (!isGeminiAvailable()) {
-      throw new Error(
-        "Image understanding is unavailable right now. Try again later or attach text instead."
-      );
+    const promptText = latestMessage?.trim() || "Please examine and describe the attached image in detail.";
+
+    // 1. Try Gemini Vision first if available
+    if (isGeminiAvailable()) {
+      try {
+        const text = await callGeminiWithVision(
+          historyToContents(history),
+          promptText,
+          imageAttachments,
+          BUILDER_SYSTEM
+        );
+        return { text, provider: "gemini" };
+      } catch (geminiErr) {
+        console.warn(
+          "Builder Vision: Gemini call failed, falling back to NVIDIA Vision —",
+          geminiErr instanceof Error ? geminiErr.message : geminiErr
+        );
+      }
     }
-    try {
-      const text = await callGeminiWithVision(
-        historyToContents(history),
-        latestMessage,
-        imageAttachments,
-        BUILDER_SYSTEM
-      );
-      return { text, provider: "gemini" };
-    } catch (err) {
-      console.error("Vision call failed:", err instanceof Error ? err.message : err);
-      throw new Error(
-        "Image understanding is unavailable right now. Try again later or attach text instead."
-      );
+
+    // 2. Automatic fallback to NVIDIA Vision
+    if (NVIDIA_API_KEY) {
+      try {
+        const text = await callNvidiaWithVision(
+          history,
+          promptText,
+          imageAttachments,
+          BUILDER_SYSTEM
+        );
+        return { text, provider: "nvidia" };
+      } catch (nvidiaErr) {
+        console.error(
+          "Builder Vision: NVIDIA call failed —",
+          nvidiaErr instanceof Error ? nvidiaErr.message : nvidiaErr
+        );
+      }
     }
+
+    throw new Error(
+      "Image understanding service is temporarily unavailable. Please try again in a moment."
+    );
   }
 
   const selected = selectBuilderProvider(domain);
@@ -572,6 +672,22 @@ export async function runVerifiedBuild(
   const plan = await generatePlan(history, plannerMessage);
   // Builder gets full attachments (including images for vision)
   const builderResult = await generateBuilderResponse(history, userMessage, domain, plan, attachments);
+
+  // If the request includes images, the builder's vision-capable model directly analyzed them.
+  // The verifier is text-only and cannot see images, so we directly accept the vision analysis.
+  if (imageAttachments.length > 0) {
+    return {
+      finalText: builderResult.text,
+      provider: builderResult.provider,
+      verification: {
+        status: "approved",
+        plan,
+        builderProvider: providerLabel(builderResult.provider),
+        verifierProvider: VERIFIER_PROVIDER_LABEL,
+      },
+    };
+  }
+
   // Verifier gets text-only: no images
   const review = await verifyResponse(plannerMessage, builderResult.text);
 

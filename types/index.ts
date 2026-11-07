@@ -24,6 +24,7 @@ export interface AttachmentMeta {
   name: string;
   type: "text" | "image";
   size: number; // bytes (original)
+  previewUrl?: string;
 }
 
 /** Payload sent from client to API — includes actual content for processing. */

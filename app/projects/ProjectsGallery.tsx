@@ -3,7 +3,7 @@
 import { useState } from "react";
 import ProjectCard from "@/components/ProjectCard";
 import NewProjectForm from "@/components/NewProjectForm";
-import type { Project, Domain } from "@/types";
+import type { Project } from "@/types";
 import { FolderKanban, Sparkles, Code2, FileText, Microscope, Briefcase, Layers } from "lucide-react";
 
 const FILTER_TABS: { id: string; label: string; icon: React.ElementType }[] = [

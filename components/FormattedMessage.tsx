@@ -8,7 +8,7 @@ import { downloadProjectZip } from "@/lib/exportZip";
 
 interface FormattedMessageProps {
   content: string;
-  isUser: boolean;
+  isUser?: boolean;
 }
 
 function CodeBlock({
@@ -130,7 +130,7 @@ function CodeBlock({
 
       {/* Code Body */}
       <div className="p-4 overflow-x-auto max-h-[550px] text-xs font-mono leading-relaxed text-gray-200 bg-[#08080d]">
-        <pre className="font-mono">
+        <pre className="font-mono overflow-x-auto">
           <code>{value}</code>
         </pre>
       </div>
@@ -140,7 +140,7 @@ function CodeBlock({
 
 export default function FormattedMessage({ content, isUser }: FormattedMessageProps) {
   if (isUser) {
-    return <div className="whitespace-pre-wrap leading-relaxed">{content}</div>;
+    return <span className="whitespace-pre-wrap leading-relaxed">{content}</span>;
   }
 
   return (
@@ -149,37 +149,52 @@ export default function FormattedMessage({ content, isUser }: FormattedMessagePr
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
-            <h1 className="text-base font-bold text-white mt-4 mb-2 pb-1 border-b border-white/10 tracking-tight">
+            <h1 className="text-xl font-bold text-white mt-4 mb-2 pb-1 border-b border-white/10 tracking-tight">
               {children}
             </h1>
           ),
           h2: ({ children }) => (
-            <h2 className="text-sm font-semibold text-gray-100 mt-3.5 mb-1.5 tracking-tight">
+            <h2 className="text-lg font-bold text-white mt-3.5 mb-1.5 tracking-tight">
               {children}
             </h2>
           ),
           h3: ({ children }) => (
-            <h3 className="text-xs font-semibold text-violet-300 mt-2.5 mb-1 uppercase tracking-wider">
+            <h3 className="text-base font-bold text-white mt-3 mb-1 tracking-tight">
               {children}
             </h3>
           ),
+          h4: ({ children }) => (
+            <h4 className="text-sm font-bold text-white mt-2.5 mb-1 tracking-tight">
+              {children}
+            </h4>
+          ),
+          h5: ({ children }) => (
+            <h5 className="text-xs font-bold text-white mt-2 mb-1 tracking-tight">
+              {children}
+            </h5>
+          ),
+          h6: ({ children }) => (
+            <h6 className="text-xs font-bold text-white mt-2 mb-1 tracking-tight">
+              {children}
+            </h6>
+          ),
           p: ({ children }) => (
-            <p className="text-sm text-gray-200 leading-relaxed my-1.5 last:mb-0">
+            <p className="text-sm text-gray-300 leading-relaxed my-2 last:mb-0">
               {children}
             </p>
           ),
           ul: ({ children }) => (
-            <ul className="list-disc list-outside pl-5 my-2 space-y-1 text-gray-200 text-sm">
+            <ul className="list-disc list-outside pl-5 my-2 space-y-1.5 text-gray-300 text-sm">
               {children}
             </ul>
           ),
           ol: ({ children }) => (
-            <ol className="list-decimal list-outside pl-5 my-2 space-y-1 text-gray-200 text-sm">
+            <ol className="list-decimal list-outside pl-5 my-2 space-y-1.5 text-gray-300 text-sm">
               {children}
             </ol>
           ),
           li: ({ children }) => (
-            <li className="text-sm text-gray-200 leading-relaxed pl-0.5">
+            <li className="text-sm text-gray-300 leading-relaxed pl-1">
               {children}
             </li>
           ),
@@ -205,7 +220,7 @@ export default function FormattedMessage({ content, isUser }: FormattedMessagePr
           th: ({ children }) => <th className="px-3.5 py-2.5 font-semibold text-gray-200">{children}</th>,
           td: ({ children }) => <td className="px-3.5 py-2 text-gray-300">{children}</td>,
           strong: ({ children }) => (
-            <strong className="font-semibold text-white tracking-normal">{children}</strong>
+            <strong className="font-bold text-white tracking-normal">{children}</strong>
           ),
           em: ({ children }) => <em className="italic text-gray-300">{children}</em>,
           a: ({ href, children }) => (
@@ -213,18 +228,20 @@ export default function FormattedMessage({ content, isUser }: FormattedMessagePr
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-violet-400 hover:text-violet-300 underline underline-offset-2 transition-colors"
+              className="text-purple-400 hover:text-pink-400 hover:underline underline-offset-2 transition-colors font-medium cursor-pointer"
             >
               {children}
             </a>
           ),
           hr: () => <hr className="my-4 border-white/10" />,
+          pre: ({ children }) => <>{children}</>,
           code({ className, children, ...props }) {
+            const rawString = String(children);
             const match = /language-(\w+)/.exec(className || "");
-            const codeString = String(children).replace(/\n$/, "");
-            const isMultiline = codeString.includes("\n") || Boolean(match);
+            const isBlock = rawString.includes("\n") || Boolean(match);
+            const codeString = rawString.replace(/\n$/, "");
 
-            if (isMultiline) {
+            if (isBlock) {
               return <CodeBlock language={match ? match[1] : ""} value={codeString} />;
             }
 

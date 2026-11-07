@@ -12,7 +12,7 @@ const ALLOWED_TEXT_MIMES = new Set([
   "application/sql", "text/yaml", "text/x-yaml",
 ]);
 const ALLOWED_IMAGE_MIMES = new Set([
-  "image/png", "image/jpeg", "image/webp",
+  "image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp",
 ]);
 const MAX_TEXT_SIZE = 200 * 1024; // 200 KB
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024; // 4 MB
@@ -46,7 +46,8 @@ function validateAttachments(
         return { valid: [], error: `Image type "${mimeType}" is not supported for ${name}. Try .png, .jpg, or .webp.` };
       }
       // base64 string → approximate original bytes
-      const approxBytes = Math.ceil(content.length * 3 / 4);
+      const rawBase64 = content.includes(",") ? content.split(",")[1] : content;
+      const approxBytes = Math.ceil(rawBase64.length * 3 / 4);
       if (approxBytes > MAX_IMAGE_SIZE) {
         return { valid: [], error: `${name} exceeds the 4 MB limit for images.` };
       }
@@ -70,15 +71,24 @@ function buildAugmentedMessage(text: string, attachments: AttachmentPayload[]): 
   return text + blocks.join("");
 }
 
-/** Extract metadata (no content) for storage in SQLite. */
+/** Extract metadata for storage in SQLite, including image preview URL so it displays cleanly in chat history. */
 function toMetadata(attachments: AttachmentPayload[]): AttachmentMeta[] {
-  return attachments.map((a) => ({
-    name: a.name,
-    type: a.type,
-    size: a.type === "text"
-      ? new TextEncoder().encode(a.content).length
-      : Math.ceil(a.content.length * 3 / 4),
-  }));
+  return attachments.map((a) => {
+    let previewUrl: string | undefined;
+    if (a.type === "image") {
+      previewUrl = a.content.startsWith("data:")
+        ? a.content
+        : `data:${a.mimeType || "image/jpeg"};base64,${a.content}`;
+    }
+    return {
+      name: a.name,
+      type: a.type,
+      size: a.type === "text"
+        ? new TextEncoder().encode(a.content).length
+        : Math.ceil((a.content.includes(",") ? a.content.split(",")[1].length : a.content.length) * 3 / 4),
+      previewUrl,
+    };
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -90,9 +100,10 @@ export async function POST(request: NextRequest) {
       attachments?: unknown;
     };
 
-    if (!projectId || !message?.trim()) {
+    const hasAttachments = Array.isArray(rawAttachments) && rawAttachments.length > 0;
+    if (!projectId || (!message?.trim() && !hasAttachments)) {
       return NextResponse.json(
-        { error: "projectId and message are required." },
+        { error: "projectId and message or attachment are required." },
         { status: 400 }
       );
     }
@@ -102,16 +113,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: attError }, { status: 400 });
     }
 
+    const effectiveMessage = message?.trim() || "Please analyze and describe the attached image in detail.";
+
     const project = db.getProject(projectId);
     if (!project) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
     const history = db.listMessages(projectId);
-    const augmentedMessage = buildAugmentedMessage(message, attachments);
+    const augmentedMessage = buildAugmentedMessage(effectiveMessage, attachments);
     const attachmentMeta = attachments.length > 0 ? toMetadata(attachments) : undefined;
 
-    db.addMessage({ projectId, role: "user", content: message, attachments: attachmentMeta });
+    db.addMessage({ projectId, role: "user", content: effectiveMessage, attachments: attachmentMeta });
 
     const { text: aiText, provider } = await generateBuilderResponse(
       history, augmentedMessage, project.domain, undefined, attachments
@@ -127,8 +140,8 @@ export async function POST(request: NextRequest) {
 
     // Memory update: pass only typed text + attachment names, never file contents or base64
     const memoryText = attachments.length > 0
-      ? `${message}\n\n[Attachments: ${attachments.map((a) => a.name).join(", ")}]`
-      : message;
+      ? `${effectiveMessage}\n\n[Attachments: ${attachments.map((a) => a.name).join(", ")}]`
+      : effectiveMessage;
     updateMemoryFromExchange(currentMemory, memoryText, aiText)
       .then((updatedMemory) => {
         db.setMemory(projectId, updatedMemory);

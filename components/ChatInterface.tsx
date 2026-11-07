@@ -32,6 +32,7 @@ import type { Message, Project, ProjectMemory, AttachmentMeta, AttachmentPayload
 import MemoryPanel from "@/components/MemoryPanel";
 import ExportModal from "@/components/ExportModal";
 import FormattedMessage from "@/components/FormattedMessage";
+import CodePreview from "@/components/CodePreview";
 import { useSpeechRecognition, speak, stopSpeaking } from "@/lib/voice";
 import { useWorkspace } from "@/components/WorkspaceLayout";
 
@@ -41,7 +42,7 @@ const TEXT_EXTENSIONS = new Set([
   ".txt", ".md", ".json", ".csv", ".js", ".jsx", ".ts", ".tsx",
   ".py", ".html", ".css", ".java", ".c", ".cpp", ".sql", ".yaml", ".yml",
 ]);
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
 const UNSUPPORTED_DOC_EXTENSIONS = new Set([".pdf", ".docx", ".xlsx", ".doc", ".xls", ".pptx"]);
 
 const MAX_TEXT_SIZE = 200 * 1024;      // 200 KB
@@ -66,6 +67,7 @@ function getMimeType(file: File, ext: string): string {
     ".c": "text/x-c", ".cpp": "text/x-c++", ".sql": "application/sql",
     ".yaml": "text/yaml", ".yml": "text/yaml",
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".gif": "image/gif", ".bmp": "image/bmp",
   };
   return map[ext] || "application/octet-stream";
 }
@@ -111,13 +113,24 @@ function downscaleImage(file: File): Promise<{ base64: string; previewUrl: strin
       canvas.width = width;
       canvas.height = height;
       const ctx = canvas.getContext("2d");
-      if (!ctx) { reject(new Error("Canvas not supported")); return; }
+      if (!ctx) {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("Canvas not supported"));
+        return;
+      }
+      // Fill canvas with white background so transparent PNGs/SVGs do not render as solid black in JPEG
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
       const base64 = dataUrl.split(",")[1];
-      resolve({ base64, previewUrl: objectUrl });
+      URL.revokeObjectURL(objectUrl);
+      resolve({ base64, previewUrl: dataUrl });
     };
-    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load image")); };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Failed to load image"));
+    };
     img.src = objectUrl;
   });
 }
@@ -298,7 +311,7 @@ export default function ChatInterface({
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || isLoading) return;
+    if ((!text && stagedAttachments.length === 0) || isLoading) return;
 
     setInput("");
     setError(null);
@@ -308,17 +321,21 @@ export default function ChatInterface({
     const currentAttachments = [...stagedAttachments];
     setStagedAttachments([]);
 
+    const hasImages = currentAttachments.some((a) => a.type === "image");
+    const effectiveText = text || (hasImages ? "Please analyze and describe this image in detail." : "Please inspect the attached file.");
+
     const optimisticId = `local-${Date.now()}`;
     const optimisticUserMessage: Message = {
       id: optimisticId,
       projectId: project.id,
       role: "user",
-      content: text,
+      content: effectiveText,
       verification: null,
       attachments: currentAttachments.map((a) => ({
         name: a.name,
         type: a.type,
         size: a.size,
+        previewUrl: a.previewUrl,
       })),
       createdAt: new Date().toISOString(),
     };
@@ -346,7 +363,7 @@ export default function ChatInterface({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId: project.id,
-          message: text,
+          message: effectiveText,
           attachments: payloadAttachments.length > 0 ? payloadAttachments : undefined,
         }),
       });
@@ -647,7 +664,7 @@ export default function ChatInterface({
               {/* Send Action Button */}
               <button
                 onClick={handleSend}
-                disabled={isLoading || !input.trim()}
+                disabled={isLoading || (!input.trim() && stagedAttachments.length === 0)}
                 className="p-2 rounded-lg bg-white/10 hover:bg-white/15 text-white font-medium border border-white/10 transition-colors disabled:cursor-not-allowed disabled:opacity-30 shrink-0"
               >
                 <Send className="w-4 h-4" />
@@ -703,41 +720,155 @@ function AttachmentChips({
   meta?: AttachmentMeta[];
   staged?: StagedAttachment[];
 }) {
+  const [selectedImg, setSelectedImg] = useState<{ src: string; name: string } | null>(null);
+
   if (!meta || meta.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-white/[0.06]">
-      {meta.map((att, idx) => {
-        const stagedMatch = staged?.find((s) => s.name === att.name && s.type === att.type);
-        return (
+    <>
+      <div className="flex flex-wrap gap-2 mt-2 pt-2 border-t border-white/[0.08]">
+        {meta.map((att, idx) => {
+          const stagedMatch = staged?.find((s) => s.name === att.name && s.type === att.type);
+          const imgSrc = att.previewUrl || stagedMatch?.previewUrl;
+
+          if (att.type === "image") {
+            return (
+              <div
+                key={idx}
+                className="group/img relative rounded-xl overflow-hidden border border-white/10 bg-black/40 hover:border-violet-500/50 transition-all max-w-[240px]"
+              >
+                {imgSrc ? (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedImg({ src: imgSrc, name: att.name })}
+                    className="block text-left cursor-zoom-in w-full"
+                    title="Click to view full image"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={imgSrc}
+                      alt={att.name}
+                      className="w-full max-h-36 object-cover rounded-t-xl hover:opacity-95 transition-opacity"
+                    />
+                    <div className="p-1.5 px-2 flex items-center justify-between gap-1.5 text-[11px] text-gray-300 bg-white/[0.04]">
+                      <span className="truncate max-w-[130px] font-medium">{att.name}</span>
+                      <span className="text-[10px] text-gray-400 shrink-0">{formatSize(att.size)}</span>
+                    </div>
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-gray-300">
+                    <ImageIcon className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                    <span className="truncate max-w-[130px] font-medium">{att.name}</span>
+                    <span className="text-[10px] text-gray-400">{formatSize(att.size)}</span>
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={idx}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[11px] text-gray-300"
+            >
+              <FileText className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+              <span className="truncate max-w-[130px] font-medium">{att.name}</span>
+              <span className="text-[10px] text-gray-400">{formatSize(att.size)}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Lightbox Image Preview Modal */}
+      {selectedImg && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 cursor-zoom-out"
+          onClick={() => setSelectedImg(null)}
+        >
           <div
-            key={idx}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white/[0.04] border border-white/[0.06] text-[11px] text-gray-400"
+            className="relative max-w-4xl max-h-[90vh] flex flex-col items-center"
+            onClick={(e) => e.stopPropagation()}
           >
-            {att.type === "image" ? (
-              stagedMatch?.previewUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={stagedMatch.previewUrl}
-                  alt={att.name}
-                  className="w-8 h-8 rounded object-cover shrink-0"
-                />
-              ) : (
-                <div className="flex items-center gap-1 text-gray-500">
-                  <ImageIcon className="w-3.5 h-3.5" />
-                  <span className="italic">image not stored</span>
-                </div>
-              )
-            ) : (
-              <FileText className="w-3 h-3 text-gray-500 shrink-0" />
-            )}
-            <span className="truncate max-w-[120px]">{att.name}</span>
-            <span className="text-[10px] text-gray-500">{formatSize(att.size)}</span>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={selectedImg.src}
+              alt={selectedImg.name}
+              className="max-w-full max-h-[80vh] rounded-xl border border-white/20 shadow-2xl object-contain bg-black/60"
+            />
+            <div className="mt-2.5 flex items-center justify-between w-full px-2 text-xs text-gray-300">
+              <span className="truncate font-medium">{selectedImg.name}</span>
+              <button
+                type="button"
+                onClick={() => setSelectedImg(null)}
+                className="px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
-        );
-      })}
-    </div>
+        </div>
+      )}
+    </>
   );
+}
+
+function extractHtmlBlock(content: string): string | null {
+  if (!content) return null;
+
+  // 1. Look for ```html ... ``` fenced block first (most common case)
+  const htmlBlockRegex = /```html\b([\s\S]*?)```/i;
+  const match = content.match(htmlBlockRegex);
+  if (match && match[1]) {
+    const code = match[1].trim();
+    if (code) return code;
+  }
+
+  // 2. Look for any generic code block: ```[lang] ... ``` that contains HTML structures
+  const genericBlockRegex = /```[a-zA-Z0-9_-]*([\s\S]*?)```/g;
+  let blockMatch;
+  while ((blockMatch = genericBlockRegex.exec(content)) !== null) {
+    const code = blockMatch[1].trim();
+    const lowerCode = code.toLowerCase();
+    if (
+      lowerCode.includes("<!doctype html") ||
+      lowerCode.includes("<html") ||
+      (lowerCode.includes("<head") && lowerCode.includes("<body")) ||
+      lowerCode.includes("</html>") ||
+      lowerCode.includes("</body>")
+    ) {
+      return code;
+    }
+  }
+
+  // 3. Look for any HTML substring in the raw content starting with <!DOCTYPE html or <html and ending with </html> or </body>
+  const lowerContent = content.toLowerCase();
+  let startIdx = lowerContent.indexOf("<!doctype html");
+  if (startIdx === -1) {
+    startIdx = lowerContent.indexOf("<html");
+  }
+
+  if (startIdx !== -1) {
+    let endIdx = lowerContent.lastIndexOf("</html>");
+    if (endIdx !== -1) {
+      endIdx += 7; // include </html>
+    } else {
+      endIdx = lowerContent.lastIndexOf("</body>");
+      if (endIdx !== -1) {
+        endIdx += 7; // include </body>
+      }
+    }
+
+    if (endIdx !== -1 && endIdx > startIdx) {
+      return content.substring(startIdx, endIdx).trim();
+    }
+
+    // Fallback: If it's a long text starting with html tag but without a clean closing tag
+    if (lowerContent.length - startIdx > 100) {
+      return content.substring(startIdx).trim();
+    }
+  }
+
+  return null;
 }
 
 // ── Message bubble ─────────────────────────────────────────────────────────
@@ -758,6 +889,7 @@ function MessageBubble({
   const isUser = message.role === "user";
   const [showVerificationDetails, setShowVerificationDetails] = useState(false);
   const [copiedMessage, setCopiedMessage] = useState(false);
+  const extractedHtml = !isUser ? extractHtmlBlock(message.content) : null;
 
   const handleCopyMessage = async () => {
     try {
@@ -801,7 +933,11 @@ function MessageBubble({
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <FormattedMessage content={message.content} isUser={isUser} />
+            {isUser ? (
+              <span className="whitespace-pre-wrap leading-relaxed">{message.content}</span>
+            ) : (
+              <FormattedMessage content={message.content} />
+            )}
             {/* Attachment chips inside the bubble */}
             {isUser && (
               <AttachmentChips
@@ -909,6 +1045,13 @@ function MessageBubble({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Code Live Preview */}
+      {extractedHtml && (
+        <div className="w-full max-w-[94%] md:max-w-[85%]">
+          <CodePreview code={extractedHtml} />
         </div>
       )}
     </div>
