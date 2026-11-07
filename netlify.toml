@@ -2,5 +2,9 @@
   command = "npm run build"
   publish = ".next"
 
+[build.environment]
+  NODE_VERSION = "20"
+  SECRETS_SCAN_OMIT_KEYS = "GROQ_MODEL,GEMINI_MODEL,NVIDIA_MODEL"
+
 [[plugins]]
   package = "@netlify/plugin-nextjs"
