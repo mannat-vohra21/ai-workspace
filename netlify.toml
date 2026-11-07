@@ -3,7 +3,7 @@
   publish = ".next"
 
 [build.environment]
-  NODE_VERSION = "20"
+  NODE_VERSION = "20.18.0"
   SECRETS_SCAN_OMIT_KEYS = "GROQ_MODEL,GEMINI_MODEL,NVIDIA_MODEL"
 
 [[plugins]]
