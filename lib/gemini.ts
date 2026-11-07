@@ -20,7 +20,7 @@
 //   Call isGeminiAvailable() to confirm GEMINI_API_KEY is set before flipping any of the above.
 import type { AttachmentPayload, Message, ProjectMemory, VerificationInfo } from "@/types";
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-flash-lite-latest";
+const MODEL = "gemini-flash-lite-latest";
 const API_KEY = process.env.GEMINI_API_KEY;
 
 export function isGeminiAvailable(): boolean {
@@ -150,7 +150,7 @@ function historyToContents(history: Message[]): GeminiContent[] {
   }));
 }
 
-const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const GROQ_MODEL = "openai/gpt-oss-120b";
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 const GROQ_PROVIDER_LABEL = "Groq (LPU Ultra-Fast)";
@@ -257,7 +257,7 @@ async function callGroq(
   }
 }
 
-const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "nvidia/nemotron-3-ultra-550b-a55b";
+const NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 async function callNvidia(
@@ -309,7 +309,7 @@ async function callNvidia(
   return text.trim();
 }
 
-const NVIDIA_VISION_MODEL = process.env.NVIDIA_VISION_MODEL || "meta/llama-3.2-11b-vision-instruct";
+const NVIDIA_VISION_MODEL = "meta/llama-3.2-11b-vision-instruct";
 
 async function callNvidiaWithVision(
   history: Message[],
