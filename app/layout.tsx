@@ -19,6 +19,8 @@ export const metadata: Metadata = {
   description: "AI-to-AI workspace with project memory and verified multi-agent build mode",
 };
 
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({
   children,
 }: {

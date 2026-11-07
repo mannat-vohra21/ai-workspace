@@ -2,6 +2,8 @@ import * as db from "@/lib/db";
 import NewProjectForm from "@/components/NewProjectForm";
 import ProjectsGallery from "./ProjectsGallery";
 
+export const dynamic = "force-dynamic";
+
 export default async function ProjectsPage() {
   const projects = db.listProjects();
 
